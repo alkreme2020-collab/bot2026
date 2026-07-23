@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: whatsapp-book-bot
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HF_TOKEN
+        sync: false
+      - key: HF_DATASET
+        sync: false
+      - key: ADMIN_NUMBER
+        sync: false
+      - key: MAX_FILE_SIZE_MB
+        value: "50"
+      - key: RATE_LIMIT_MS
+        value: "1000"
+      - key: REQUEST_COOLDOWN_MS
+        value: "180000"
+      - key: PORT
+        value: "3000"
+      - key: AUTH_DIR
+        value: /tmp/baileys_auth

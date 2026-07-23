@@ -1,0 +1,13 @@
+node_modules
+npm-debug.log
+.baileys_auth
+.wwebjs_auth
+database.sqlite
+logs
+temp
+uploads
+.env
+.git
+.gitignore
+README.md
+DEVELOPMENT_REPORT.md
