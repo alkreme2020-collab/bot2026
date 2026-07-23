@@ -6,6 +6,8 @@ import logger from '../utils/logger.js';
 
 export const msgStore = new Map();
 
+export let latestQr = null;
+
 export const client = {
   initialize: async () => {
     const authDir = process.env.AUTH_DIR || '/tmp/baileys_auth';
@@ -32,6 +34,7 @@ export const client = {
       const { connection, lastDisconnect, qr } = update;
       
       if (qr) {
+        latestQr = qr;
         logger.info('WhatsApp QR Code generated. Please scan it:');
         qrcode.generate(qr, { small: true });
       }
@@ -43,6 +46,7 @@ export const client = {
           client.initialize();
         }
       } else if (connection === 'open') {
+        latestQr = null;
         logger.info('WhatsApp Bot Client is fully authenticated and READY!');
       }
     });
