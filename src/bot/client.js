@@ -55,8 +55,9 @@ export const client = {
       
       if (qr) {
         latestQr = qr;
-        logger.info('WhatsApp QR Code generated. Please scan it or use Pairing Code:');
-        qrcode.generate(qr, { small: true });
+        qrcode.generate(qr, { small: true }, (qrString) => {
+          console.log('\n================ WhatsApp QR Code ================\n' + qrString + '\n==================================================\n');
+        });
       }
 
       if (connection === 'close') {
