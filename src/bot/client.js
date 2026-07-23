@@ -7,6 +7,7 @@ import logger from '../utils/logger.js';
 export const msgStore = new Map();
 
 export let latestQr = null;
+export let latestPairingCode = null;
 
 export const client = {
   initialize: async () => {
@@ -30,12 +31,31 @@ export const client = {
       }
     });
 
+    // Request Pairing Code if phone number is provided and not registered yet
+    let rawNumber = process.env.PAIRING_NUMBER || process.env.ADMIN_NUMBER;
+    if (rawNumber && !state.creds.registered) {
+      const cleanNumber = rawNumber.replace(/[^0-9]/g, '');
+      if (cleanNumber) {
+        setTimeout(async () => {
+          try {
+            const code = await sock.requestPairingCode(cleanNumber);
+            latestPairingCode = code;
+            logger.info('====================================================');
+            logger.info(`YOUR WHATSAPP PAIRING CODE IS: [ ${code} ]`);
+            logger.info('====================================================');
+          } catch (err) {
+            logger.error(`Error generating pairing code: ${err.stack || err.message}`);
+          }
+        }, 3000);
+      }
+    }
+
     sock.ev.on('connection.update', (update) => {
       const { connection, lastDisconnect, qr } = update;
       
       if (qr) {
         latestQr = qr;
-        logger.info('WhatsApp QR Code generated. Please scan it:');
+        logger.info('WhatsApp QR Code generated. Please scan it or use Pairing Code:');
         qrcode.generate(qr, { small: true });
       }
 
@@ -47,6 +67,7 @@ export const client = {
         }
       } else if (connection === 'open') {
         latestQr = null;
+        latestPairingCode = null;
         logger.info('WhatsApp Bot Client is fully authenticated and READY!');
       }
     });
