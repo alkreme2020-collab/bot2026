@@ -23,8 +23,8 @@ function downloadFile(url, destPath) {
     };
 
     https.get(url, options, (res) => {
-      // Follow redirects (HF uses 302)
-      if (res.statusCode === 302 || res.statusCode === 301) {
+      // Follow redirects (HF uses 301, 302, 307)
+      if (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307 || res.statusCode === 308) {
         return downloadFile(res.headers.location, destPath).then(resolve).catch(reject);
       }
       if (res.statusCode === 404) {
