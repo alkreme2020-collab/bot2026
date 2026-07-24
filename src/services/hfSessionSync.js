@@ -7,6 +7,11 @@ import logger from '../utils/logger.js';
 
 const SESSION_FOLDER_IN_HF = 'whatsapp_session';
 
+// Debounce: prevent uploading more than once every 2 minutes
+let uploadDebounceTimer = null;
+let lastUploadTime = 0;
+const UPLOAD_DEBOUNCE_MS = 2 * 60 * 1000; // 2 minutes
+
 /**
  * Download a single file from Hugging Face Dataset into local path.
  */
@@ -109,35 +114,58 @@ export const hfSessionSync = {
 
   /**
    * Upload all local session files from authDir to HF Dataset.
-   * Called after successful WhatsApp connection and on creds.update.
+   * Debounced: will not upload more than once every 2 minutes.
    */
   async uploadSession(authDir) {
     if (!config.hfToken || !config.hfDataset) return;
     if (!fs.existsSync(authDir)) return;
 
-    const files = fs.readdirSync(authDir);
-    if (files.length === 0) return;
+    // Clear any pending upload timer and schedule a new one
+    if (uploadDebounceTimer) {
+      clearTimeout(uploadDebounceTimer);
+    }
 
-    try {
-      const filesToUpload = files.map(fileName => {
-        const localPath = path.join(authDir, fileName);
-        const fileBuffer = fs.readFileSync(localPath);
-        return {
-          path: `${SESSION_FOLDER_IN_HF}/${fileName}`,
-          content: new Blob([fileBuffer])
-        };
+    // If last upload was recent, debounce and wait
+    const now = Date.now();
+    const timeSinceLast = now - lastUploadTime;
+    const delay = timeSinceLast < UPLOAD_DEBOUNCE_MS
+      ? UPLOAD_DEBOUNCE_MS - timeSinceLast
+      : 0;
+
+    uploadDebounceTimer = setTimeout(async () => {
+      uploadDebounceTimer = null;
+      lastUploadTime = Date.now();
+
+      const files = fs.readdirSync(authDir).filter(f => {
+        try { return fs.statSync(path.join(authDir, f)).isFile(); } catch { return false; }
       });
+      if (files.length === 0) return;
 
-      await uploadFiles({
-        repo: { type: 'dataset', name: config.hfDataset },
-        accessToken: config.hfToken,
-        files: filesToUpload,
-        commitTitle: 'Update WhatsApp session'
-      });
+      try {
+        const filesToUpload = files.map(fileName => {
+          const localPath = path.join(authDir, fileName);
+          const fileBuffer = fs.readFileSync(localPath);
+          return {
+            path: `${SESSION_FOLDER_IN_HF}/${fileName}`,
+            content: new Blob([fileBuffer])
+          };
+        });
 
-      logger.info(`[SessionSync] ✅ Uploaded ${files.length} session files to HF Dataset.`);
-    } catch (err) {
-      logger.error(`[SessionSync] Failed to upload session to HF: ${err.message}`);
+        await uploadFiles({
+          repo: { type: 'dataset', name: config.hfDataset },
+          accessToken: config.hfToken,
+          files: filesToUpload,
+          commitTitle: 'Update WhatsApp session'
+        });
+
+        logger.info(`[SessionSync] ✅ Session synced to HF (${files.length} files).`);
+      } catch (err) {
+        logger.error(`[SessionSync] Failed to upload session to HF: ${err.message}`);
+      }
+    }, delay);
+
+    if (delay > 0) {
+      logger.info(`[SessionSync] Upload scheduled in ${Math.round(delay / 1000)}s (debounced).`);
     }
   }
 };
