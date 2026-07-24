@@ -1,6 +1,5 @@
 import fs from 'fs';
 import path from 'path';
-import https from 'https';
 import { uploadFiles } from '@huggingface/hub';
 import { config } from '../config/index.js';
 import logger from '../utils/logger.js';
@@ -13,64 +12,42 @@ let lastUploadTime = 0;
 const UPLOAD_DEBOUNCE_MS = 2 * 60 * 1000; // 2 minutes
 
 /**
- * Download a single file from Hugging Face Dataset into local path.
+ * Download a single file using native fetch (handles all redirects automatically).
  */
-function downloadFile(url, destPath) {
-  return new Promise((resolve, reject) => {
-    const token = config.hfToken;
-    const options = {
-      headers: token ? { Authorization: `Bearer ${token}` } : {}
-    };
-
-    https.get(url, options, (res) => {
-      // Follow redirects (HF uses 301, 302, 307)
-      if (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307 || res.statusCode === 308) {
-        return downloadFile(res.headers.location, destPath).then(resolve).catch(reject);
-      }
-      if (res.statusCode === 404) {
-        return resolve(false); // File not found is OK (first run)
-      }
-      if (res.statusCode !== 200) {
-        return reject(new Error(`HTTP ${res.statusCode} downloading ${url}`));
-      }
-      const fileStream = fs.createWriteStream(destPath);
-      res.pipe(fileStream);
-      fileStream.on('finish', () => { fileStream.close(); resolve(true); });
-      fileStream.on('error', reject);
-    }).on('error', reject);
+async function downloadFile(url, destPath) {
+  const res = await fetch(url, {
+    headers: config.hfToken ? { Authorization: `Bearer ${config.hfToken}` } : {},
+    redirect: 'follow'
   });
+
+  if (res.status === 404) return false;
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+
+  const buffer = Buffer.from(await res.arrayBuffer());
+  fs.writeFileSync(destPath, buffer);
+  return true;
 }
 
 /**
- * Get list of session files stored in HF Dataset.
+ * Get list of session files stored in HF Dataset via API.
  */
 async function getSessionFileList() {
-  return new Promise((resolve) => {
+  try {
     const url = `https://huggingface.co/api/datasets/${config.hfDataset}/tree/main/${SESSION_FOLDER_IN_HF}`;
-    const options = {
+    const res = await fetch(url, {
       headers: {
         Authorization: `Bearer ${config.hfToken}`,
         'Content-Type': 'application/json'
-      }
-    };
+      },
+      redirect: 'follow'
+    });
 
-    https.get(url, options, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        if (res.statusCode === 200) {
-          try {
-            const files = JSON.parse(data);
-            resolve(files.filter(f => f.type === 'file').map(f => f.path));
-          } catch {
-            resolve([]);
-          }
-        } else {
-          resolve([]); // Folder doesn't exist yet
-        }
-      });
-    }).on('error', () => resolve([]));
-  });
+    if (!res.ok) return [];
+    const files = await res.json();
+    return files.filter(f => f.type === 'file').map(f => f.path);
+  } catch {
+    return [];
+  }
 }
 
 export const hfSessionSync = {
@@ -132,6 +109,10 @@ export const hfSessionSync = {
       ? UPLOAD_DEBOUNCE_MS - timeSinceLast
       : 0;
 
+    if (delay > 0) {
+      logger.info(`[SessionSync] Upload scheduled in ${Math.round(delay / 1000)}s (debounced).`);
+    }
+
     uploadDebounceTimer = setTimeout(async () => {
       uploadDebounceTimer = null;
       lastUploadTime = Date.now();
@@ -163,9 +144,5 @@ export const hfSessionSync = {
         logger.error(`[SessionSync] Failed to upload session to HF: ${err.message}`);
       }
     }, delay);
-
-    if (delay > 0) {
-      logger.info(`[SessionSync] Upload scheduled in ${Math.round(delay / 1000)}s (debounced).`);
-    }
   }
 };
