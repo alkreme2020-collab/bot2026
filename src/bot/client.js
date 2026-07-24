@@ -90,6 +90,12 @@ export const client = {
         latestPairingCode = null;
         isRequestingPairing = false;
         logger.info('WhatsApp Bot Client is fully authenticated and READY!');
+        // Show bot as online/available
+        try {
+          await sock.sendPresenceUpdate('available');
+        } catch (e) {
+          logger.warn(`Could not set presence: ${e.message}`);
+        }
         // Upload session to HF immediately after successful connection
         await hfSessionSync.uploadSession(authDir);
       }
