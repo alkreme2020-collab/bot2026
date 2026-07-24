@@ -8,6 +8,7 @@ export const msgStore = new Map();
 
 export let latestQr = null;
 export let latestPairingCode = null;
+let isRequestingPairing = false;
 
 export const client = {
   initialize: async () => {
@@ -31,22 +32,27 @@ export const client = {
       }
     });
 
-    // Request Pairing Code if phone number is provided and not registered yet
-    let rawNumber = process.env.PAIRING_NUMBER || process.env.ADMIN_NUMBER;
-    if (rawNumber && !state.creds.registered) {
+    // Request Pairing Code ONCE if BOT_NUMBER is provided and not registered yet
+    let rawNumber = process.env.BOT_NUMBER || process.env.PAIRING_NUMBER;
+    if (rawNumber && !state.creds.registered && !isRequestingPairing && !latestPairingCode) {
       const cleanNumber = rawNumber.replace(/[^0-9]/g, '');
       if (cleanNumber) {
+        isRequestingPairing = true;
         setTimeout(async () => {
           try {
-            const code = await sock.requestPairingCode(cleanNumber);
-            latestPairingCode = code;
-            logger.info('====================================================');
-            logger.info(`YOUR WHATSAPP PAIRING CODE IS: [ ${code} ]`);
-            logger.info('====================================================');
+            if (!state.creds.registered) {
+              const code = await sock.requestPairingCode(cleanNumber);
+              latestPairingCode = code;
+              logger.info('====================================================');
+              logger.info(`YOUR WHATSAPP PAIRING CODE IS: [ ${code} ]`);
+              logger.info('====================================================');
+            }
           } catch (err) {
             logger.error(`Error generating pairing code: ${err.stack || err.message}`);
+          } finally {
+            isRequestingPairing = false;
           }
-        }, 3000);
+        }, 4000);
       }
     }
 
@@ -61,14 +67,23 @@ export const client = {
       }
 
       if (connection === 'close') {
-        const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-        logger.warn(`WhatsApp connection closed. Reconnecting: ${shouldReconnect}`);
+        const statusCode = (lastDisconnect?.error)?.output?.statusCode;
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+        logger.warn(`WhatsApp connection closed (Status: ${statusCode || 'unknown'}). Reconnecting: ${shouldReconnect}`);
         if (shouldReconnect) {
-          client.initialize();
+          setTimeout(() => {
+            client.initialize();
+          }, 3000);
+        } else {
+          logger.error('Client logged out. Clearing authentication state for fresh login...');
+          latestPairingCode = null;
+          latestQr = null;
+          isRequestingPairing = false;
         }
       } else if (connection === 'open') {
         latestQr = null;
         latestPairingCode = null;
+        isRequestingPairing = false;
         logger.info('WhatsApp Bot Client is fully authenticated and READY!');
       }
     });
