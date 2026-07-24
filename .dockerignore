@@ -2,7 +2,6 @@ node_modules
 npm-debug.log
 .baileys_auth
 .wwebjs_auth
-database.sqlite
 logs
 temp
 uploads
