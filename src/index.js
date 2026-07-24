@@ -109,12 +109,12 @@ app.get(['/', '/qr', '/code', '/pair'], async (req, res) => {
  */
 async function startApp() {
   try {
-    logger.info('Bootstrapping Arabic WhatsApp Book Library (Version 2.0)...');
+    logger.info('Bootstrapping Arabic WhatsApp Audio Library (Version 2.0)...');
 
     // 1. Initialize Database connection and verify schemas
     await initDatabase();
 
-    // 2. Initialize in-memory Books Cache index
+    // 2. Initialize in-memory Audios Cache index
     await cacheService.init();
 
     // 3. Start HTTP Express Server (Used for keep-alive health pings)

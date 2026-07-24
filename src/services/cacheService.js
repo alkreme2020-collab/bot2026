@@ -46,8 +46,7 @@ export const cacheService = {
    * Return the array of cached audios
    * @returns {Array<object>}
    */
-  getBooks() {
-    // Kept as getBooks() for compatibility with searchService and other callers
+  getAudios() {
     return audiosCache;
   },
 

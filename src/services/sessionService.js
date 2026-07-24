@@ -26,7 +26,7 @@ export const sessionService = {
   },
 
   /**
-   * Check if user is in cooldown period between submitting books.
+   * Check if user is in cooldown period between submitting audios.
    * @param {string} phone
    * @returns {Promise<{isCooldown: boolean, remainingMs: number}>}
    */

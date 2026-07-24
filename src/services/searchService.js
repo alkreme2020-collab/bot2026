@@ -55,7 +55,7 @@ export const searchService = {
 
     const normQuery = normalizeArabic(query);
     const queryWords = normQuery.split(' ').filter(w => w.length > 0);
-    const cachedAudios = cacheService.getBooks();
+    const cachedAudios = cacheService.getAudios();
     const matches = [];
 
     for (const audio of cachedAudios) {

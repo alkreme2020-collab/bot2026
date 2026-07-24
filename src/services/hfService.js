@@ -7,7 +7,7 @@ export const hfService = {
   /**
    * Upload a local file to the Hugging Face Dataset repository.
    * @param {string} localPath - Absolute local file path
-   * @param {string} pathInRepo - Path inside the dataset repository (e.g. 'books/pdf/uuid.pdf')
+   * @param {string} pathInRepo - Path inside the dataset repository (e.g. 'audios/uuid.mp3')
    * @returns {Promise<string>} - Resolve/Download URL of the uploaded file
    */
   async uploadFile(localPath, pathInRepo) {

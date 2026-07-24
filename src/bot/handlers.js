@@ -12,6 +12,8 @@ import { searchService } from '../services/searchService.js';
 import logger, { dbLog } from '../utils/logger.js';
 import { msgStore } from './client.js';
 
+const lastWarningTimes = new Map();
+
 /**
  * Extract text body or selected poll/button value from raw Baileys message object
  * @param {object} rawMsg 
@@ -20,6 +22,19 @@ import { msgStore } from './client.js';
  */
 function uniqueValues(values) {
   return [...new Set(values.filter(Boolean))];
+}
+
+function suppressPollEcho(phone, body, isPollVote) {
+  if (!body || isPollVote) return false;
+  const recentSent = recentPollSent.get(phone);
+  if (recentSent && Date.now() - recentSent.ts < 5000) {
+    if (recentSent.values.includes(body)) {
+      logger.info(`Suppressing poll echo for ${phone}: "${body}"`);
+      recentPollSent.clear(phone);
+      return true;
+    }
+  }
+  return false;
 }
 
 function asBuffer(value) {
@@ -265,7 +280,7 @@ function detectAudioMessage(rawMsg) {
     }
   }
 
-  return { hasAudio: false, mimetype: '', isDocument: false };
+return { hasAudio: false, mimetype: '', isDocument: false, filename: null };
 }
 
 /**
@@ -301,11 +316,10 @@ export async function handleMessage(sock, rawMsg) {
 
   if (!rawMsg.isPollSelection && sessionService.isRateLimited(phone)) {
     const now = Date.now();
-    if (!global.lastWarningTimes) global.lastWarningTimes = new Map();
-    const lastWarn = global.lastWarningTimes.get(phone) || 0;
+    const lastWarn = lastWarningTimes.get(phone) || 0;
     
     if (now - lastWarn > 5000) {
-      global.lastWarningTimes.set(phone, now);
+      lastWarningTimes.set(phone, now);
       await sock.sendMessage(remoteJid, { text: '⚠️ الرجاء إرسال الرسائل ببطء لتجنب الحظر.' }, { quoted: rawMsg });
     }
     return;
@@ -331,16 +345,7 @@ export async function handleMessage(sock, rawMsg) {
 
     // Skip echo suppression for poll votes — they are genuine user selections, not echoes
     const isPollVote = rawMsg.isPollSelection || rawMsg.message?.pollUpdateMessage;
-    if (body && !isPollVote) {
-      const recentSent = recentPollSent.get(phone);
-      if (recentSent && Date.now() - recentSent.ts < 5000) {
-        if (recentSent.values.includes(body)) {
-          logger.info(`Suppressing poll echo for ${phone}: "${body}"`);
-          recentPollSent.clear(phone);
-          return;
-        }
-      }
-    }
+    if (suppressPollEcho(phone, body, isPollVote)) return;
 
     // Map Poll option selections to standard command terms
     const pollMap = {
@@ -388,16 +393,7 @@ export async function handleMessage(sock, rawMsg) {
       isPollSelection: !!(rawMsg.isPollSelection || (rawMsg.message && rawMsg.message.pollUpdateMessage))
     };
 
-    if (body && !isPollVote) {
-      const recentSent = recentPollSent.get(phone);
-      if (recentSent && Date.now() - recentSent.ts < 5000) {
-        if (recentSent.values.includes(body)) {
-          logger.info(`Suppressing poll echo for ${phone}: "${body}"`);
-          recentPollSent.clear(phone);
-          return;
-        }
-      }
-    }
+    if (suppressPollEcho(phone, body, isPollVote)) return;
 
     const session = sessionService.getSession(phone);
 
@@ -433,29 +429,29 @@ export async function handleMessage(sock, rawMsg) {
           await userCommands.executeSearch(sock, msg, body);
           return;
         case 'SEARCH_RESULTS': {
-          const lastBooks = session.data.lastBooks || [];
-          if (lastBooks.length === 0) {
+          const lastAudios = session.data.lastAudios || [];
+          if (lastAudios.length === 0) {
             sessionService.clearSession(msg.from);
             break; // Let it fall through to normal command processing
           }
           
           let targetUuid = null;
           if (body === 'تحميل') {
-            targetUuid = lastBooks[0].uuid; // Default to first audio
+            targetUuid = lastAudios[0].uuid; // Default to first audio
           } else if (body.startsWith('تحميل ')) {
             const num = parseInt(body.substring(5).trim(), 10);
-            if (!isNaN(num) && num > 0 && num <= lastBooks.length) {
-              targetUuid = lastBooks[num - 1].uuid;
+            if (!isNaN(num) && num > 0 && num <= lastAudios.length) {
+              targetUuid = lastAudios[num - 1].uuid;
             }
           } else {
             const num = parseInt(body, 10);
-            if (!isNaN(num) && num > 0 && num <= lastBooks.length) {
-              targetUuid = lastBooks[num - 1].uuid;
+            if (!isNaN(num) && num > 0 && num <= lastAudios.length) {
+              targetUuid = lastAudios[num - 1].uuid;
             }
           }
 
           if (targetUuid) {
-            return await userCommands.downloadBook(sock, msg, targetUuid);
+            return await userCommands.downloadAudio(sock, msg, targetUuid);
           }
           
           // If the message wasn't a valid download command for search results,
@@ -502,8 +498,8 @@ export async function handleMessage(sock, rawMsg) {
         if (spaceIdx !== -1) { reqId = paramStr.substring(0, spaceIdx).trim(); reason = paramStr.substring(spaceIdx).trim(); }
         return await adminCommands.rejectRequest(sock, msg, reqId, reason);
       }
-      if (body.startsWith('حذف ')) return await adminCommands.deleteBook(sock, msg, body.substring(4).trim());
-      if (body.startsWith('تعديل ')) return await adminCommands.editBook(sock, msg, body.substring(6).trim());
+      if (body.startsWith('حذف ')) return await adminCommands.deleteAudio(sock, msg, body.substring(4).trim());
+      if (body.startsWith('تعديل ')) return await adminCommands.editAudio(sock, msg, body.substring(6).trim());
       if (body === 'إحصائيات' || body === 'احصائيات الإدارة') return await adminCommands.displayAdminStats(sock, msg);
       if (body.startsWith('رسالة جماعية ')) return await adminCommands.broadcastMessage(sock, msg, body.substring(13).trim());
       if (body === 'نسخة احتياطية' || body === 'نسخة') return await adminCommands.sendBackup(sock, msg);
@@ -515,12 +511,12 @@ export async function handleMessage(sock, rawMsg) {
     if (['بحث', 'البحث'].includes(cleanBody)) return await userCommands.promptSearch(sock, msg);
     if (['تصنيفات', 'التصنيفات'].includes(cleanBody)) return await userCommands.displayCategories(sock, msg);
     if (['جميع', 'جميع الصوتيات', 'كل الصوتيات'].includes(cleanBody)) return await userCommands.displayAllAudios(sock, msg);
-    if (['جديد', 'أحدث الصوتيات', 'احدث الصوتيات'].includes(cleanBody)) return await userCommands.displayRecentBooks(sock, msg);
+    if (['جديد', 'أحدث الصوتيات', 'احدث الصوتيات'].includes(cleanBody)) return await userCommands.displayRecentAudios(sock, msg);
     if (['احصائيات', 'إحصائيات المكتبة', 'احصائيات المكتبة'].includes(cleanBody)) return await userCommands.displayLibraryStats(sock, msg);
     if (['مفضلة', 'المفضلة'].includes(cleanBody)) return await userCommands.displayFavorites(sock, msg);
     if (['اشتراك', 'الاشتراك'].includes(cleanBody)) return await userCommands.handleSubscribe(sock, msg);
-    if (['اضافة', 'إضافة صوتية', 'اضافة صوتية'].includes(cleanBody)) return await userCommands.promptBookUpload(sock, msg);
-    if (body.startsWith('تحميل ')) return await userCommands.downloadBook(sock, msg, body.substring(6).trim());
+    if (['اضافة', 'إضافة صوتية', 'اضافة صوتية'].includes(cleanBody)) return await userCommands.promptAudioUpload(sock, msg);
+    if (body.startsWith('تحميل ')) return await userCommands.downloadAudio(sock, msg, body.substring(6).trim());
     if (body.startsWith('مفضلة ')) return await userCommands.addToFavorites(sock, msg, body.substring(6).trim());
     if (body.startsWith('حذف_مفضلة ')) return await userCommands.removeFromFavorites(sock, msg, body.substring(10).trim());
 
