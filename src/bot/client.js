@@ -3,6 +3,7 @@ import pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import { handleMessage } from './handlers.js';
 import logger from '../utils/logger.js';
+import { hfSessionSync } from '../services/hfSessionSync.js';
 
 export const msgStore = new Map();
 
@@ -13,6 +14,10 @@ let isRequestingPairing = false;
 export const client = {
   initialize: async () => {
     const authDir = process.env.AUTH_DIR || '/tmp/baileys_auth';
+
+    // Download saved session from Hugging Face before initializing (if available)
+    await hfSessionSync.downloadSession(authDir);
+
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
     const sock = makeWASocket({
@@ -85,10 +90,16 @@ export const client = {
         latestPairingCode = null;
         isRequestingPairing = false;
         logger.info('WhatsApp Bot Client is fully authenticated and READY!');
+        // Upload session to HF immediately after successful connection
+        await hfSessionSync.uploadSession(authDir);
       }
     });
 
-    sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('creds.update', async () => {
+      await saveCreds();
+      // Sync updated credentials to HF Dataset for persistence
+      await hfSessionSync.uploadSession(authDir);
+    });
 
     sock.ev.on('messages.upsert', async (m) => {
       try {
