@@ -65,10 +65,6 @@ export async function initDatabase() {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
-    -- Migration: add media_type column if missing (for existing DBs)
-    try { await db.run("ALTER TABLE requests ADD COLUMN media_type TEXT DEFAULT 'audio'"); } catch(e) {}
-    try { await db.run("ALTER TABLE audios ADD COLUMN media_type TEXT DEFAULT 'audio'"); } catch(e) {}
-
     CREATE TABLE IF NOT EXISTS favorites (
       user_phone TEXT,
       audio_uuid TEXT,
@@ -133,6 +129,8 @@ export async function initDatabase() {
   try { await db.run('ALTER TABLE audios ADD COLUMN date_hijri TEXT DEFAULT \'\''); } catch (e) {}
   try { await db.run('ALTER TABLE requests ADD COLUMN location TEXT DEFAULT \'\''); } catch (e) {}
   try { await db.run('ALTER TABLE requests ADD COLUMN date_hijri TEXT DEFAULT \'\''); } catch (e) {}
+  try { await db.run("ALTER TABLE requests ADD COLUMN media_type TEXT DEFAULT 'audio'"); } catch (e) {}
+  try { await db.run("ALTER TABLE audios ADD COLUMN media_type TEXT DEFAULT 'audio'"); } catch (e) {}
 
   // Setup logging integration to write into logs table
   setDbLogWriter(async (type, message) => {
