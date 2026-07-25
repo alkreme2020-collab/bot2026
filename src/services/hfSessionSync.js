@@ -62,18 +62,24 @@ export const hfSessionSync = {
       return;
     }
 
-    logger.info('[SessionSync] Checking for saved session on Hugging Face...');
+    logger.info(`[SessionSync] Checking for saved session on Hugging Face (dataset: ${config.hfDataset})...`);
+
+    // Ensure local auth directory exists BEFORE downloading
+    fs.mkdirSync(authDir, { recursive: true });
+    logger.info(`[SessionSync] Auth directory ready: ${authDir}`);
+
     const files = await getSessionFileList();
 
     if (files.length === 0) {
-      logger.info('[SessionSync] No saved session found on HF. Will start fresh (QR/Pairing needed).');
+      logger.warn('[SessionSync] ⚠️  No saved session found on HF. Bot needs a new QR/Pairing code.');
+      logger.warn(`[SessionSync] → Open https://your-bot.onrender.com and scan the QR code.`);
       return;
     }
 
-    // Ensure local auth directory exists
-    fs.mkdirSync(authDir, { recursive: true });
+    logger.info(`[SessionSync] Found ${files.length} session file(s) on HF. Downloading…`);
 
     let downloaded = 0;
+    let failed = 0;
     for (const filePath of files) {
       const fileName = path.basename(filePath);
       const localPath = path.join(authDir, fileName);
@@ -82,11 +88,16 @@ export const hfSessionSync = {
         const ok = await downloadFile(url, localPath);
         if (ok) downloaded++;
       } catch (err) {
+        failed++;
         logger.error(`[SessionSync] Failed to download ${fileName}: ${err.message}`);
       }
     }
 
-    logger.info(`[SessionSync] ✅ Downloaded ${downloaded}/${files.length} session files from HF.`);
+    if (downloaded === files.length) {
+      logger.info(`[SessionSync] ✅ All ${downloaded} session files downloaded successfully.`);
+    } else {
+      logger.warn(`[SessionSync] ⚠️  Downloaded ${downloaded}/${files.length} files (${failed} failed).`);
+    }
   },
 
   /**

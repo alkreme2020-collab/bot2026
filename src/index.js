@@ -120,6 +120,22 @@ async function startApp() {
     // 3. Start HTTP Express Server (Used for keep-alive health pings)
     app.listen(config.port, () => {
       logger.info(`Express health server listening on port ${config.port}`);
+
+      // ─── Self Keep-Alive Ping (Prevents Render free-tier sleep) ──────────
+      // Render shuts down free services after 15 minutes of inactivity.
+      // We ping our own health endpoint every 14 minutes to stay alive.
+      const KEEP_ALIVE_INTERVAL_MS = 14 * 60 * 1000; // 14 minutes
+      setInterval(async () => {
+        try {
+          const url = `http://localhost:${config.port}/health`;
+          const res = await fetch(url);
+          logger.info(`[KeepAlive] Self-ping OK — status=${res.status}`);
+        } catch (err) {
+          logger.warn(`[KeepAlive] Self-ping failed: ${err.message}`);
+        }
+      }, KEEP_ALIVE_INTERVAL_MS);
+      logger.info(`[KeepAlive] Self-ping enabled every ${KEEP_ALIVE_INTERVAL_MS / 60000} minutes.`);
+      // ─────────────────────────────────────────────────────────────────────
     });
 
     // 4. Connect to WhatsApp Web

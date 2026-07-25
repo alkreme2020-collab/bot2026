@@ -13,12 +13,27 @@ let isRequestingPairing = false;
 
 export const client = {
   initialize: async () => {
-    const authDir = process.env.AUTH_DIR || '/tmp/baileys_auth';
+    const authDir = process.env.AUTH_DIR || '/app/.baileys_auth';
 
     // Download saved session from Hugging Face before initializing (if available)
     await hfSessionSync.downloadSession(authDir);
 
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
+
+    // ─── Session Health Check ──────────────────────────────────────────────
+    const isRegistered = state?.creds?.registered === true;
+    const hasAccountInfo = !!state?.creds?.account;
+    const meId = state?.creds?.me?.id || null;
+
+    logger.info(`[SessionCheck] registered=${isRegistered}, hasAccount=${hasAccountInfo}, me=${meId || 'unknown'}`);
+
+    if (!isRegistered) {
+      logger.warn('[SessionCheck] ⚠️  Session is NOT registered. A new QR/Pairing code will be required.');
+      logger.warn('[SessionCheck] → Open the bot URL on Render and scan the QR or use the pairing code.');
+    } else {
+      logger.info(`[SessionCheck] ✅ Valid session found for ${meId}. Connecting…`);
+    }
+    // ──────────────────────────────────────────────────────────────────────
 
     const sock = makeWASocket({
       auth: state,
@@ -61,35 +76,73 @@ export const client = {
       }
     }
 
+    // ─── Reconnection backoff state ────────────────────────────────────────
+    let reconnectAttempt = 0;
+    const MAX_RECONNECT_DELAY_MS = 60000; // max 1 minute
+
+    function scheduleReconnect() {
+      // Exponential backoff: 3s, 6s, 12s, 24s, 48s, 60s…
+      const delay = Math.min(3000 * Math.pow(2, reconnectAttempt), MAX_RECONNECT_DELAY_MS);
+      reconnectAttempt++;
+      logger.warn(`[Reconnect] Attempt #${reconnectAttempt} scheduled in ${Math.round(delay / 1000)}s…`);
+      setTimeout(() => {
+        client.initialize();
+      }, delay);
+    }
+    // ──────────────────────────────────────────────────────────────────────
+
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
       
       if (qr) {
         latestQr = qr;
+        logger.info('[Connection] QR Code generated — waiting for scan.');
         qrcode.generate(qr, { small: true }, (qrString) => {
           console.log('\n================ WhatsApp QR Code ================\n' + qrString + '\n==================================================\n');
         });
       }
 
+      if (connection === 'connecting') {
+        logger.info('[Connection] Connecting to WhatsApp servers…');
+      }
+
       if (connection === 'close') {
         const statusCode = (lastDisconnect?.error)?.output?.statusCode;
+        const errorMessage = lastDisconnect?.error?.message || 'unknown';
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-        logger.warn(`WhatsApp connection closed (Status: ${statusCode || 'unknown'}). Reconnecting: ${shouldReconnect}`);
+
+        logger.warn(`[Connection] Closed — statusCode=${statusCode || 'unknown'}, error="${errorMessage}", willReconnect=${shouldReconnect}`);
+
         if (shouldReconnect) {
-          setTimeout(() => {
-            client.initialize();
-          }, 3000);
+          scheduleReconnect();
         } else {
-          logger.error('Client logged out. Clearing authentication state for fresh login...');
+          logger.error('[Connection] ❌ Logged out permanently. Clearing session to allow fresh login…');
           latestPairingCode = null;
           latestQr = null;
           isRequestingPairing = false;
+          // Clear the stale local session so the next boot forces a new QR
+          try {
+            const fs = await import('fs');
+            const path = await import('path');
+            const files = fs.default.readdirSync(authDir);
+            for (const f of files) {
+              fs.default.unlinkSync(path.default.join(authDir, f));
+            }
+            logger.info('[Connection] Local session files cleared. Restarting…');
+          } catch (e) {
+            logger.warn(`[Connection] Could not clear session files: ${e.message}`);
+          }
+          setTimeout(() => client.initialize(), 3000);
         }
       } else if (connection === 'open') {
+        // Reset backoff on successful connection
+        reconnectAttempt = 0;
         latestQr = null;
         latestPairingCode = null;
         isRequestingPairing = false;
-        logger.info('WhatsApp Bot Client is fully authenticated and READY!');
+        logger.info('✅✅✅ WhatsApp Bot Client is fully authenticated and READY! ✅✅✅');
+        logger.info(`[Connection] Connected as: ${sock.user?.id || 'unknown'}`);
+
         // Show bot as online/available
         try {
           await sock.sendPresenceUpdate('available');
