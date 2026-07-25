@@ -137,6 +137,11 @@ export const client = {
           }
           // ────────────────────────────────────────────────────────────────
 
+          // ─── Clear invalid session from HuggingFace FIRST ───────────────
+          // This prevents the restart loop: invalid HF session → download → reject → loop
+          await hfSessionSync.clearSession();
+          // ────────────────────────────────────────────────────────────────
+
           latestPairingCode = null;
           latestQr = null;
           isRequestingPairing = false;

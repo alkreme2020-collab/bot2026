@@ -155,5 +155,52 @@ export const hfSessionSync = {
         logger.error(`[SessionSync] Failed to upload session to HF: ${err.message}`);
       }
     }, delay);
+  },
+
+  /**
+   * Delete all WhatsApp session files from HF Dataset.
+   * Called when the bot is permanently logged out to prevent
+   * the restart loop of re-downloading an invalid session.
+   */
+  async clearSession() {
+    if (!config.hfToken || !config.hfDataset) return;
+
+    logger.info('[SessionSync] 🗑️  Clearing invalid session from HuggingFace...');
+
+    try {
+      const files = await getSessionFileList();
+      if (files.length === 0) {
+        logger.info('[SessionSync] No session files found on HF to clear.');
+        return;
+      }
+
+      // HuggingFace Hub API: delete files by uploading an empty commit with deletions
+      const { deleteFiles } = await import('@huggingface/hub');
+      await deleteFiles({
+        repo: { type: 'dataset', name: config.hfDataset },
+        accessToken: config.hfToken,
+        paths: files,
+        commitTitle: 'Clear invalidated WhatsApp session'
+      });
+
+      logger.info(`[SessionSync] ✅ Cleared ${files.length} session file(s) from HuggingFace.`);
+    } catch (err) {
+      // deleteFiles might not be available in older versions — fallback: overwrite with empty marker
+      logger.warn(`[SessionSync] deleteFiles failed (${err.message}), trying fallback overwrite...`);
+      try {
+        await uploadFiles({
+          repo: { type: 'dataset', name: config.hfDataset },
+          accessToken: config.hfToken,
+          files: [{
+            path: `${SESSION_FOLDER_IN_HF}/.session_cleared`,
+            content: new Blob([JSON.stringify({ cleared: true, at: new Date().toISOString() })])
+          }],
+          commitTitle: 'Mark session as cleared'
+        });
+        logger.info('[SessionSync] ✅ Placed session-cleared marker on HuggingFace.');
+      } catch (fallbackErr) {
+        logger.error(`[SessionSync] Could not clear HF session: ${fallbackErr.message}`);
+      }
+    }
   }
 };
