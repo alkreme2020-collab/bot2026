@@ -61,8 +61,13 @@ export async function initDatabase() {
       location TEXT DEFAULT '',
       date_hijri TEXT DEFAULT '',
       audio_temp TEXT,
+      media_type TEXT DEFAULT 'audio',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    -- Migration: add media_type column if missing (for existing DBs)
+    try { await db.run("ALTER TABLE requests ADD COLUMN media_type TEXT DEFAULT 'audio'"); } catch(e) {}
+    try { await db.run("ALTER TABLE audios ADD COLUMN media_type TEXT DEFAULT 'audio'"); } catch(e) {}
 
     CREATE TABLE IF NOT EXISTS favorites (
       user_phone TEXT,
@@ -92,7 +97,36 @@ export async function initDatabase() {
       message TEXT,
       date DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS categories (
+      name TEXT PRIMARY KEY,
+      display_order INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
   `);
+
+  // Seed default categories from config if table is empty
+  const catCount = await db.get('SELECT COUNT(*) as count FROM categories');
+  if (catCount.count === 0) {
+    const defaultCats = config.categories;
+    for (let i = 0; i < defaultCats.length; i++) {
+      await db.run(
+        'INSERT OR IGNORE INTO categories (name, display_order) VALUES (?, ?)',
+        [defaultCats[i], i]
+      );
+    }
+    logger.info(`Seeded ${defaultCats.length} default categories.`);
+  }
+
+  // Refresh config categories from database
+  try {
+    const dbCats = await db.all('SELECT name FROM categories ORDER BY display_order ASC');
+    if (dbCats.length > 0) {
+      config.categories = dbCats.map(r => r.name);
+    }
+  } catch (e) {
+    logger.warn(`Could not load categories from DB: ${e.message}`);
+  }
 
   // Add new columns for existing databases (safe to run even if columns exist)
   try { await db.run('ALTER TABLE audios ADD COLUMN location TEXT DEFAULT \'\''); } catch (e) {}

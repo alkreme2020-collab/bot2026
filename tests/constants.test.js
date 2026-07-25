@@ -24,7 +24,7 @@ describe('audio constants', () => {
   });
 
   it('has main menu options', () => {
-    expect(MAIN_MENU_OPTIONS.length).toBe(8);
+    expect(MAIN_MENU_OPTIONS.length).toBe(9);
     expect(MAIN_MENU_OPTIONS[0]).toContain('بحث');
   });
 });

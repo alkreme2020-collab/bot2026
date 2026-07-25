@@ -11,7 +11,7 @@ import { recentPollSent } from '../../services/pollTracker.js';
 import logger, { dbLog } from '../../utils/logger.js';
 import { phoneToJid } from '../../utils/jidHelper.js';
 import { msgStore } from '../../bot/client.js';
-import { SUPPORTED_AUDIO_MIMETYPES, SUPPORTED_EXTENSIONS, EXTENSION_TO_MIMETYPE, MAIN_MENU_OPTIONS } from '../../constants/audio.js';
+import { SUPPORTED_AUDIO_MIMETYPES, SUPPORTED_EXTENSIONS, EXTENSION_TO_MIMETYPE, VIDEO_EXTENSION_TO_MIMETYPE, MAIN_MENU_OPTIONS } from '../../constants/audio.js';
 
 /**
  * Format bytes into human-readable string in Arabic
@@ -31,36 +31,6 @@ export function formatBytes(bytes) {
  * @param {number} seconds
  * @returns {string}
  */
-export function formatDuration(seconds) {
-  if (!seconds || seconds === 0) return 'غير معروف';
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
-  if (h > 0) {
-    return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-  }
-  return `${m}:${String(s).padStart(2, '0')}`;
-}
-
-/**
- * Check if a MIME type or filename belongs to a supported audio format
- * @param {string} mimetype
- * @param {string} [filename]
- * @returns {boolean}
- */
-function isAudioFile(mimetype, filename) {
-  if (mimetype && SUPPORTED_AUDIO_MIMETYPES.some(m => mimetype.toLowerCase().startsWith(m.split('/')[0]) && mimetype.toLowerCase().includes(m.split('/')[1]))) {
-    return true;
-  }
-  if (mimetype && mimetype.toLowerCase().startsWith('audio/')) {
-    return true;
-  }
-  if (filename) {
-    const ext = path.extname(filename).toLowerCase();
-    return SUPPORTED_EXTENSIONS.includes(ext);
-  }
-  return false;
-}
 
 export const userCommands = {
   /**
@@ -550,6 +520,37 @@ export const userCommands = {
   },
 
   /**
+   * Display audios added in the last 7 days.
+   * @param {object} client
+   * @param {object} msg
+   */
+  async displayNewThisWeek(client, msg) {
+    try {
+      const audios = await dbService.getAudiosThisWeek();
+      if (audios.length === 0) {
+        await msg.reply('📭 لا توجد صوتيات جديدة هذا الأسبوع.');
+        return;
+      }
+      sessionService.setSession(msg.from, 'SEARCH_RESULTS', {
+        lastAudios: audios
+      });
+      let response = `🆕 *جديد هذا الأسبوع (${audios.length}):*\n\n`;
+      for (let i = 0; i < audios.length; i++) {
+        const a = audios[i];
+        response += `🎙️ *[${i + 1}]* *${a.title}* - ${a.presenter}\n`;
+        response += `📂 التصنيف: ${a.category}\n`;
+        if (a.location) response += `📍 ${a.location}\n`;
+        response += '\n';
+      }
+      response += `🔽 أرسل رقم الصوتية للتحميل`;
+      await msg.reply(response);
+    } catch (err) {
+      logger.error(`Error displaying new this week: ${err.message}`);
+      await msg.reply('❌ حدث خطأ أثناء جلب الصوتيات الجديدة.');
+    }
+  },
+
+  /**
    * Display library public stats
    * @param {object} client
    * @param {object} msg
@@ -643,10 +644,14 @@ export const userCommands = {
       const subscribers = await dbService.getAllSubscribers();
       if (subscribers.length === 0) return;
 
-      logger.info(`Notifying ${subscribers.length} subscribers about new audio: ${audio.title}`);
-      const caption = `🔔 *صوتية جديدة مضافة للمكتبة!*
+      const mediaType = audio.media_type || 'audio';
+      const typeLabel = mediaType === 'video' ? 'فيديو' : 'صوتية';
+      const emoji = mediaType === 'video' ? '🎬' : '🎙️';
+
+      logger.info(`Notifying ${subscribers.length} subscribers about new ${typeLabel}: ${audio.title}`);
+      const caption = `🔔 *${typeLabel} جديدة مضافة للمكتبة!*
       
-🎙️ *${audio.title}*
+${emoji} *${audio.title}*
 👤 *المقدم:* ${audio.presenter}
 📂 *التصنيف:* ${audio.category}
 ${audio.location ? `📍 *المكان:* ${audio.location}\n` : ''}${audio.date_hijri ? `📅 *التاريخ:* ${audio.date_hijri}\n` : ''}💾 ${formatBytes(audio.size)}
@@ -658,7 +663,7 @@ ${audio.location ? `📍 *المكان:* ${audio.location}\n` : ''}${audio.date_
         try {
           await client.sendMessage(phoneToJid(phone), { text: caption });
           sent++;
-          await new Promise(r => setTimeout(r, 1500)); // 1.5s delay between each
+          await new Promise(r => setTimeout(r, 1500));
         } catch (err) {
           logger.warn(`Failed to notify subscriber ${phone}: ${err.message}`);
         }
@@ -722,7 +727,11 @@ ${audio.location ? `📍 *المكان:* ${audio.location}\n` : ''}${audio.date_
         return;
       }
 
-      await msg.reply(`⏳ جاري تحميل صوتية *"${audio.title}"* وإرسالها لك، يرجى الانتظار...`);
+      const mediaType = audio.media_type || 'audio';
+      const typeLabel = mediaType === 'video' ? 'فيديو' : 'صوتية';
+      const emoji = mediaType === 'video' ? '🎬' : '🎙️';
+
+      await msg.reply(`⏳ جاري تحميل ${typeLabel} *"${audio.title}"* وإرسالها لك، يرجى الانتظار...`);
 
       // Determine file extension from hf_url or default to mp3
       const urlPath = audio.hf_url.split('?')[0];
@@ -749,23 +758,33 @@ ${audio.location ? `📍 *المكان:* ${audio.location}\n` : ''}${audio.date_
 
       const cleanTitle = audio.title.replace(/[\\/:*?"<>|]/g, '') || 'audio';
 
-      // Determine mimetype based on extension
-      const mimetype = EXTENSION_TO_MIMETYPE[ext.toLowerCase()] || 'audio/mpeg';
+      const extLower = ext.toLowerCase();
+      const mimetype = mediaType === 'video'
+        ? (VIDEO_EXTENSION_TO_MIMETYPE[extLower] || 'video/mp4')
+        : (EXTENSION_TO_MIMETYPE[extLower] || 'audio/mpeg');
 
-      // Send audio file
-      await client.sendMessage(msg.remoteJid, {
-        document: buffer,
-        mimetype: mimetype,
-        fileName: `${cleanTitle}${ext}`,
-        caption: `🎙️ *صوتيتك جاهزة للتحميل:*
+      const caption = `${emoji} *${typeLabel}تك جاهزة للتحميل:*
         
 - *العنوان:* ${audio.title}
 - *المقدم:* ${audio.presenter}
 - *التصنيف:* ${audio.category}
 ${audio.location ? `- *المكان:* ${audio.location}\n` : ''}${audio.date_hijri ? `- *التاريخ:* ${audio.date_hijri}\n` : ''}- *الحجم:* ${formatBytes(audio.size)}
+`;
 
-استماع ممتع! 🎧✨`
-      }, { quoted: msg.raw });
+      if (mediaType === 'video') {
+        await client.sendMessage(msg.remoteJid, {
+          video: buffer,
+          mimetype,
+          caption
+        }, { quoted: msg.raw });
+      } else {
+        await client.sendMessage(msg.remoteJid, {
+          document: buffer,
+          mimetype,
+          fileName: `${cleanTitle}${ext}`,
+          caption
+        }, { quoted: msg.raw });
+      }
 
       // Cleanup
       if (fs.existsSync(tempPath)) {
@@ -787,22 +806,58 @@ ${audio.location ? `- *المكان:* ${audio.location}\n` : ''}${audio.date_hij
    * @param {object} msg
    */
   async promptAudioUpload(client, msg) {
-    // Check request cooldown
     const cooldown = await sessionService.checkRequestCooldown(msg.from);
     if (cooldown.isCooldown) {
       const minutes = Math.ceil(cooldown.remainingMs / 60000);
-      await msg.reply(`⚠️ عذراً، لقد قمت بإرسال طلب مؤخراً. يرجى الانتظار *${minutes} دقيقة* قبل تقديم طلب صوتية آخر لمنع إساءة الاستخدام.`);
+      await msg.reply(`⚠️ عذراً، لقد قمت بإرسال طلب مؤخراً. يرجى الانتظار *${minutes} دقيقة* قبل تقديم طلب آخر.`);
       return;
     }
 
-    sessionService.setSession(msg.from, 'AWAITING_AUDIO_UPLOAD');
-    await msg.reply(`📤 ممتاز! يرجى إرسال الملف الصوتي الآن كملف مرفق.
+    sessionService.setSession(msg.from, 'AWAITING_MEDIA_TYPE');
+    try {
+      const sentMsg = await client.sendMessage(msg.remoteJid, {
+        poll: {
+          name: '📤 اختر نوع المحتوى الذي تريد رفعه:',
+          values: ['🎙️ صوتية', '🎬 فيديو', '❌ إلغاء'],
+          selectableCount: 1
+        }
+      });
+      if (sentMsg?.key?.id && sentMsg.message) {
+        msgStore.set(sentMsg.key.id, sentMsg.message);
+      }
+      recentPollSent.record(msg.from, ['🎙️ صوتية', '🎬 فيديو', '❌ إلغاء']);
+    } catch (err) {
+      logger.warn(`Could not send media type poll: ${err.message}`);
+      await msg.reply('📤 اختر نوع المحتوى: أرسل "صوتية" أو "فيديو" أو "إلغاء".');
+    }
+  },
 
-✅ *الصيغ المدعومة:*
-• MP3, M4A, AAC, OGG
-• WAV, WEBM, FLAC, OPUS
+  async handleMediaTypeSelection(client, msg, body) {
+    const text = (body || '').trim();
+    if (text.includes('صوتية') || text.includes('🎙️') || text === 'صوت') {
+      sessionService.setSession(msg.from, 'AWAITING_AUDIO_UPLOAD');
+      await msg.reply(`📤 أرسل الملف الصوتي الآن.
 
-💡 *نصيحة:* أرسل الملف كـ "مستند" وليس كصوتية مباشرة للحصول على أفضل جودة.`);
+✅ *الصيغ المدعومة:* MP3, M4A, AAC, OGG, WAV, FLAC
+
+💡 أرسل الملف كـ "مستند" للحصول على أفضل جودة.`);
+      return;
+    }
+    if (text.includes('فيديو') || text.includes('🎬') || text === 'video') {
+      sessionService.setSession(msg.from, 'AWAITING_VIDEO_UPLOAD');
+      await msg.reply(`📤 أرسل ملف الفيديو الآن.
+
+✅ *الصيغ المدعومة:* MP4, MKV, WEBM, AVI, MOV
+
+💡 أرسل الملف كـ "مستند".`);
+      return;
+    }
+    if (text.includes('إلغاء') || text.includes('❌')) {
+      sessionService.clearSession(msg.from);
+      await msg.reply('✅ تم إلغاء عملية الرفع.');
+      return;
+    }
+    await msg.reply('❌ اختر "صوتية" أو "فيديو" أو "إلغاء" من الاستطلاع.');
   },
 
   /**
@@ -892,6 +947,70 @@ ${audio.location ? `- *المكان:* ${audio.location}\n` : ''}${audio.date_hij
   },
 
   /**
+   * Receive and validate video upload, download to local uploads/
+   * @param {object} client
+   * @param {object} msg
+   */
+  async handleVideoUpload(client, msg) {
+    try {
+      const buffer = await downloadMediaMessage(
+        msg.raw, 'buffer', {}, { logger }
+      );
+      if (!buffer) {
+        throw new Error('Failed to download media buffer');
+      }
+
+      const header = buffer.subarray(0, 12);
+      const headerHex = header.toString('hex').toLowerCase();
+
+      const isMP4 = headerHex.substring(8, 16) === '66747970';
+      const isWEBM = headerHex.startsWith('1a45dfa3');
+      const isAVI = headerHex.startsWith('52494646');
+
+      const mimetype = msg.mimetype || '';
+      const isValidMime = mimetype.startsWith('video/');
+
+      if (!isMP4 && !isWEBM && !isAVI && !isValidMime) {
+        await msg.reply('❌ الملف لا يبدو ملف فيديو صالحاً.\n\nالصيغ المدعومة: MP4, MKV, WEBM, AVI, MOV.');
+        sessionService.clearSession(msg.from);
+        return;
+      }
+
+      const sizeMb = buffer.length / (1024 * 1024);
+      if (sizeMb > config.maxFileSizeMb) {
+        await msg.reply(`❌ حجم الملف (${sizeMb.toFixed(2)} MB) يتجاوز *${config.maxFileSizeMb} MB*.`);
+        sessionService.clearSession(msg.from);
+        return;
+      }
+
+      let ext = '.mp4';
+      if (isWEBM || mimetype.includes('webm')) ext = '.webm';
+      else if (isAVI || mimetype.includes('avi')) ext = '.avi';
+      else if (mimetype.includes('mkv')) ext = '.mkv';
+      else if (mimetype.includes('mov') || mimetype.includes('quicktime')) ext = '.mov';
+
+      const tempId = uuidv4();
+      const tempFilename = `video_${tempId}${ext}`;
+      const tempPath = path.join(config.rootDir, 'uploads', tempFilename);
+
+      fs.writeFileSync(tempPath, buffer);
+
+      sessionService.setSession(msg.from, 'AWAITING_ADD_TITLE', {
+        audio_temp: tempPath,
+        file_size: buffer.length,
+        file_ext: ext,
+        media_type: 'video'
+      });
+
+      await msg.reply(`📥 تم استلام الفيديو بنجاح! (${sizeMb.toFixed(2)} MB)\n\nمن فضلك أرسل *عنوان الفيديو* الآن:`);
+    } catch (err) {
+      logger.error(`Error during video upload: ${err.message}`);
+      await msg.reply('❌ حدث خطأ أثناء استلام الفيديو.');
+      sessionService.clearSession(msg.from);
+    }
+  },
+
+  /**
    * Save audio title from wizard
    * @param {object} client
    * @param {object} msg
@@ -918,6 +1037,12 @@ ${audio.location ? `- *المكان:* ${audio.location}\n` : ''}${audio.date_hij
     const presenter = msg.body.trim();
     if (presenter.length < 2) {
       await msg.reply('❌ اسم المقدم قصير جداً. يرجى إدخال اسم صحيح:');
+      return;
+    }
+
+    if (session.data.media_type === 'video') {
+      sessionService.setSession(msg.from, 'AWAITING_ADD_LOCATION', { presenter });
+      await msg.reply('📍 من فضلك أرسل *المكان* (اسم المسجد، المنطقة) أو أرسل "تخطي" للمتابعة:');
       return;
     }
 
@@ -1017,7 +1142,10 @@ ${audio.location ? `- *المكان:* ${audio.location}\n` : ''}${audio.date_hij
   async handleAddDescription(client, msg, session) {
     const text = msg.body.trim();
     const description = text.toLowerCase() === 'تخطي' ? '' : text;
-    const { title, presenter, category, location, date_hijri, audio_temp, file_size, file_ext } = session.data;
+    const { title, presenter, location, date_hijri, audio_temp, file_size, file_ext, media_type } = session.data;
+    const category = media_type === 'video' ? 'مقتطفات' : session.data.category;
+    const typeLabel = media_type === 'video' ? 'فيديو' : 'صوتية';
+    const emoji = media_type === 'video' ? '🎬' : '🎙️';
 
     try {
       const requestUuid = uuidv4();
@@ -1032,25 +1160,26 @@ ${audio.location ? `- *المكان:* ${audio.location}\n` : ''}${audio.date_hij
         description,
         location,
         date_hijri,
-        audio_temp
+        audio_temp,
+        media_type: media_type || 'audio'
       });
 
       // Clear session
       sessionService.clearSession(msg.from);
 
       // Confirm to user
-      await msg.reply(`✅ تم استلام صوتيتك وتفاصيلها بنجاح!
+      await msg.reply(`✅ تم استلام ${typeLabel}تك و تفاصيلها بنجاح!
       
-سيدخل الملف الصوتي مرحلة المراجعة وسنقوم بإشعارك تلقائياً فور اعتماده وإضافته للمكتبة.`);
+سيدخل الملف مرحلة المراجعة وسنقوم بإشعارك فور اعتماده.`);
 
       // Log action
-      await dbLog('AUDIO_PROPOSAL', `User ${msg.from} proposed audio: ${title} (Request UUID: ${requestUuid})`);
+      await dbLog('MEDIA_PROPOSAL', `User ${msg.from} proposed ${typeLabel}: ${title} (Request UUID: ${requestUuid})`);
 
       // Notify Admin
-      const adminMsg = `⚠️ *طلب إضافة صوتية جديدة معلق* ⚠️
+      const adminMsg = `⚠️ *طلب إضافة ${typeLabel} جديدة معلق* ⚠️
 
 - *رقم الطلب:* ${requestUuid}
-- *عنوان الصوتية:* ${title}
+- *العنوان:* ${title}
 - *المقدم:* ${presenter}
 - *المكان:* ${location || 'غير محدد'}
 - *التاريخ:* ${date_hijri || 'غير محدد'}
@@ -1059,21 +1188,22 @@ ${audio.location ? `- *المكان:* ${audio.location}\n` : ''}${audio.date_hij
 - *المرسل:* ${msg.from}
 
 ✅ للموافقة والرفع: أرسل \`قبول ${requestUuid}\`
-❌ للرفض مع إشعار: أرسل \`رفض ${requestUuid} [سبب الرفض]\``;
+❌ للرفض: أرسل \`رفض ${requestUuid} [سبب الرفض]\``;
 
-      // Send notification message and the actual audio file to admin
+      // Send notification message and the actual file to admin
       const adminJid = phoneToJid(config.adminNumber);
       await client.sendMessage(adminJid, { text: adminMsg });
       
-      // Determine mimetype for admin preview
       const ext = file_ext || '.mp3';
-      const mimetype = EXTENSION_TO_MIMETYPE[ext] || 'audio/mpeg';
+      const mimetype = media_type === 'video'
+        ? (VIDEO_EXTENSION_TO_MIMETYPE[ext] || 'video/mp4')
+        : (EXTENSION_TO_MIMETYPE[ext] || 'audio/mpeg');
       
       await client.sendMessage(adminJid, { 
         document: fs.readFileSync(audio_temp), 
-        mimetype: mimetype, 
+        mimetype, 
         fileName: `${title}${ext}`,
-        caption: `🎙️ ملف صوتية: ${title}` 
+        caption: `${emoji} ملف ${typeLabel}: ${title}` 
       });
 
       try {

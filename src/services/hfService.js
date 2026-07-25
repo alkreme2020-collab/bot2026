@@ -50,5 +50,44 @@ export const hfService = {
       logger.error(`Failed to upload file to Hugging Face Hub: ${err.message}`);
       throw err;
     }
+  },
+
+  /**
+   * Delete a file from the Hugging Face Dataset repository.
+   * @param {string} pathInRepo - Path inside the dataset repository (e.g. 'audios/uuid.mp3')
+   * @returns {Promise<void>}
+   */
+  async deleteFile(pathInRepo) {
+    if (!config.hfToken || config.hfToken.startsWith('hf_placeholder')) {
+      throw new Error('Hugging Face Access Token is not set.');
+    }
+    if (!config.hfDataset || config.hfDataset.includes('your_username')) {
+      throw new Error('Hugging Face Dataset name is not configured.');
+    }
+
+    logger.info(`Deleting file from Hugging Face: ${pathInRepo}`);
+
+    try {
+      const { deleteFiles } = await import('@huggingface/hub');
+      await deleteFiles({
+        repo: { type: 'dataset', name: config.hfDataset },
+        accessToken: config.hfToken,
+        paths: [pathInRepo]
+      });
+      logger.info(`Hugging Face deletion successful: ${pathInRepo}`);
+    } catch (err) {
+      logger.warn(`Failed to delete file from Hub (trying overwrite fallback): ${err.message}`);
+      try {
+        const emptyBlob = new Blob([]);
+        await uploadFiles({
+          repo: { type: 'dataset', name: config.hfDataset },
+          accessToken: config.hfToken,
+          files: [{ path: pathInRepo, content: emptyBlob }]
+        });
+        logger.info(`Hugging Face fallback overwrite done: ${pathInRepo}`);
+      } catch (fallbackErr) {
+        logger.error(`Fallback overwrite also failed: ${fallbackErr.message}`);
+      }
+    }
   }
 };

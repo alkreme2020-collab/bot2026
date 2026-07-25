@@ -70,9 +70,9 @@ export const dbService = {
     await db.run(
       `INSERT INTO audios (
         uuid, title, presenter, category, description, keywords, 
-        hf_url, cover_url, location, date_hijri, duration, size, sha256, 
+        hf_url, cover_url, location, date_hijri, duration, size, sha256, media_type,
         downloads, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
       [
         audio.uuid,
         audio.title,
@@ -86,7 +86,8 @@ export const dbService = {
         audio.date_hijri || '',
         audio.duration || 0,
         audio.size || 0,
-        audio.sha256
+        audio.sha256,
+        audio.media_type || 'audio'
       ]
     );
   },
@@ -172,8 +173,8 @@ export const dbService = {
     const db = getDb();
     await db.run(
       `INSERT INTO requests (
-        uuid, phone, status, title, presenter, category, description, location, date_hijri, audio_temp, created_at
-      ) VALUES (?, ?, 'WAITING', ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+        uuid, phone, status, title, presenter, category, description, location, date_hijri, audio_temp, media_type, created_at
+      ) VALUES (?, ?, 'WAITING', ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
       [
         req.uuid,
         req.phone,
@@ -183,7 +184,8 @@ export const dbService = {
         req.description || '',
         req.location || '',
         req.date_hijri || '',
-        req.audio_temp
+        req.audio_temp,
+        req.media_type || 'audio'
       ]
     );
   },
@@ -357,6 +359,69 @@ export const dbService = {
   },
 
   // ==========================================
+  // CATEGORIES OPERATIONS
+  // ==========================================
+
+  /**
+   * Get all categories ordered by display_order.
+   * @returns {Promise<string[]>}
+   */
+  async getAllCategories() {
+    const db = getDb();
+    const rows = await db.all('SELECT name FROM categories ORDER BY display_order ASC');
+    return rows.map(r => r.name);
+  },
+
+  /**
+   * Add a new category.
+   * @param {string} name
+   * @returns {Promise<boolean>} - true if added, false if already exists
+   */
+  async addCategory(name) {
+    const db = getDb();
+    try {
+      const maxOrder = await db.get('SELECT COALESCE(MAX(display_order), -1) + 1 as next FROM categories');
+      await db.run('INSERT INTO categories (name, display_order) VALUES (?, ?)', [name, maxOrder.next]);
+      return true;
+    } catch (e) {
+      if (e.message.includes('UNIQUE')) return false;
+      throw e;
+    }
+  },
+
+  /**
+   * Rename a category.
+   * @param {string} oldName
+   * @param {string} newName
+   * @returns {Promise<boolean>}
+   */
+  async updateCategory(oldName, newName) {
+    const db = getDb();
+    try {
+      await db.run('UPDATE categories SET name = ? WHERE name = ?', [newName, oldName]);
+      await db.run('UPDATE audios SET category = ? WHERE category = ?', [newName, oldName]);
+      return true;
+    } catch (e) {
+      if (e.message.includes('UNIQUE')) return false;
+      throw e;
+    }
+  },
+
+  /**
+   * Delete a category. Audios in this category are reassigned to the first available category.
+   * @param {string} name
+   * @returns {Promise<boolean>}
+   */
+  async deleteCategory(name) {
+    const db = getDb();
+    const fallback = await db.get("SELECT name FROM categories WHERE name != ? ORDER BY display_order ASC LIMIT 1", [name]);
+    const fallbackName = fallback ? fallback.name : 'عام';
+    await db.run('UPDATE audios SET category = ? WHERE category = ?', [fallbackName, name]);
+    await db.run('DELETE FROM categories WHERE name = ?', [name]);
+    return true;
+  },
+
+  // ==========================================
   // STATISTICS OPERATIONS
   // ==========================================
 
@@ -418,6 +483,17 @@ export const dbService = {
       "SELECT COUNT(*) as count FROM audios WHERE created_at >= date('now', '-7 days')"
     );
     return res.count;
+  },
+
+  /**
+   * Get full audio records added in the last 7 days.
+   * @returns {Promise<Array<object>>}
+   */
+  async getAudiosThisWeek() {
+    const db = getDb();
+    return db.all(
+      "SELECT * FROM audios WHERE created_at >= datetime('now', '-7 days') ORDER BY created_at DESC"
+    );
   },
 
   /**

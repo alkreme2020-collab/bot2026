@@ -67,7 +67,9 @@ function extractMessageBody(rawMsg, botUser = {}, resolvedPhone = '') {
     try {
       const params = JSON.parse(m.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson);
       if (params.id) return String(params.id).trim();
-    } catch (e) {}
+    } catch (e) {
+      logger.warn(`Failed to parse interactive response paramsJson: ${e.message}`);
+    }
   }
 
   // 4. Poll Vote Updates
@@ -197,6 +199,7 @@ function extractMessageBody(rawMsg, botUser = {}, resolvedPhone = '') {
           "🔔 الاشتراك", "الاشتراك",
           "📤 إضافة صوتية", "إضافة صوتية",
           "📊 إحصائيات المكتبة", "إحصائيات المكتبة",
+          "🆕 جديد الأسبوع", "جديد الأسبوع",
           "➡️ التالي", "⬅️ السابق", "🔙 القائمة الرئيسية"
         ];
 
@@ -284,6 +287,36 @@ return { hasAudio: false, mimetype: '', isDocument: false, filename: null };
 }
 
 /**
+ * Check if incoming message contains a video file
+ * @param {object} rawMsg
+ * @returns {{ hasVideo: boolean, mimetype: string }}
+ */
+function detectVideoMessage(rawMsg) {
+  const m = rawMsg.message;
+  if (!m) return { hasVideo: false, mimetype: '' };
+
+  if (m.videoMessage) {
+    return { hasVideo: true, mimetype: m.videoMessage.mimetype || 'video/mp4' };
+  }
+
+  if (m.documentMessage) {
+    const mime = (m.documentMessage.mimetype || '').toLowerCase();
+    const fname = (m.documentMessage.fileName || '').toLowerCase();
+    const videoExtensions = ['.mp4', '.mkv', '.webm', '.avi', '.mov', '.m4v'];
+    const videoMimes = ['video/'];
+
+    const isMimeVideo = videoMimes.some(vm => mime.startsWith(vm));
+    const isExtVideo = videoExtensions.some(ext => fname.endsWith(ext));
+
+    if (isMimeVideo || isExtVideo) {
+      return { hasVideo: true, mimetype: mime };
+    }
+  }
+
+  return { hasVideo: false, mimetype: '' };
+}
+
+/**
  * Main message handler entry point.
  * @param {object} sock
  * @param {object} rawMsg
@@ -305,7 +338,24 @@ export async function handleMessage(sock, rawMsg) {
     }
   }
   
-  if (isGroup) return;
+  // Handle group messages – only respond when bot is @mentioned
+  if (isGroup) {
+    const botJid = sock.user?.id ? jidNormalizedUser(sock.user.id) : '';
+    const mentioned = rawMsg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+    const isMentioned = botJid && mentioned.some(j => jidNormalizedUser(j) === botJid);
+
+    if (!isMentioned) return;
+
+    // Use the participant's phone for session tracking
+    const participant = rawMsg.key.participant || rawMsg.key.remoteJid;
+    phone = participant.split('@')[0];
+
+    // Resolve LID for group participant
+    if (participant.endsWith('@lid')) {
+      const resolved = resolveLidToPhone(phone);
+      if (resolved) phone = resolved;
+    }
+  }
 
   // Ignore old messages (older than 60 seconds) to prevent startup spam loops
   const msgTimestamp = Number(rawMsg.messageTimestamp) || 0;
@@ -357,6 +407,8 @@ export async function handleMessage(sock, rawMsg) {
       'جميع الصوتيات': 'جميع',
       '✨ أحدث الصوتيات': 'جديد',
       'أحدث الصوتيات': 'جديد',
+      '🆕 جديد الأسبوع': 'جديد الاسبوع',
+      'جديد الأسبوع': 'جديد الاسبوع',
       '⭐ المفضلة': 'مفضلة',
       'المفضلة': 'مفضلة',
       '🔔 الاشتراك': 'اشتراك',
@@ -376,15 +428,18 @@ export async function handleMessage(sock, rawMsg) {
     
     // Create a polyfill for msg to make commands compatible
     const audioInfo = detectAudioMessage(rawMsg);
+    const videoInfo = detectVideoMessage(rawMsg);
     const msg = {
       from: phone,
       remoteJid: remoteJid,
       body: body,
       pushname: name,
-      hasMedia: audioInfo.hasAudio || !!(rawMsg.message?.documentMessage || rawMsg.message?.imageMessage),
+      hasMedia: audioInfo.hasAudio || videoInfo.hasVideo || !!(rawMsg.message?.documentMessage || rawMsg.message?.imageMessage),
       hasAudio: audioInfo.hasAudio,
-      mimetype: audioInfo.mimetype || rawMsg.message?.documentMessage?.mimetype || rawMsg.message?.imageMessage?.mimetype,
+      hasVideo: videoInfo.hasVideo,
+      mimetype: audioInfo.mimetype || videoInfo.mimetype || rawMsg.message?.documentMessage?.mimetype || rawMsg.message?.imageMessage?.mimetype,
       type: rawMsg.message?.audioMessage ? 'audio'
+          : rawMsg.message?.videoMessage ? 'video'
           : rawMsg.message?.documentMessage ? 'document'
           : rawMsg.message?.imageMessage ? 'image'
           : 'chat',
@@ -392,8 +447,6 @@ export async function handleMessage(sock, rawMsg) {
       raw: rawMsg,
       isPollSelection: !!(rawMsg.isPollSelection || (rawMsg.message && rawMsg.message.pollUpdateMessage))
     };
-
-    if (suppressPollEcho(phone, body, isPollVote)) return;
 
     const session = sessionService.getSession(phone);
 
@@ -407,19 +460,23 @@ export async function handleMessage(sock, rawMsg) {
       return await userCommands.handleStart(sock, msg);
     }
 
-    // Handle incoming audio files
-    if (msg.hasAudio) {
-      const currentSession = sessionService.getSession(phone);
-      if (currentSession.state === 'AWAITING_AUDIO_UPLOAD') {
-        logger.info(`Received audio file from user ${phone}. Processing upload.`);
-        await userCommands.handleAudioUpload(sock, msg);
-        return;
-      } else {
-        // User sent an audio file without being in upload mode – prompt them
-        logger.info(`Received unsolicited audio from user ${phone}. Suggesting upload flow.`);
-        await msg.reply(`🎙️ استلمنا ملفك الصوتي!\n\nإذا كنت تريد إضافته للمكتبة، أرسل كلمة *اضافة* أولاً ثم أرسل الملف.`);
-        return;
-      }
+    // Handle incoming media files (audio/video)
+    const currentSession = sessionService.getSession(phone);
+    if (msg.hasAudio && currentSession.state === 'AWAITING_AUDIO_UPLOAD') {
+      logger.info(`Received audio file from user ${phone}. Processing upload.`);
+      await userCommands.handleAudioUpload(sock, msg);
+      return;
+    }
+    if (msg.hasVideo && currentSession.state === 'AWAITING_VIDEO_UPLOAD') {
+      logger.info(`Received video file from user ${phone}. Processing upload.`);
+      await userCommands.handleVideoUpload(sock, msg);
+      return;
+    }
+    if (msg.hasAudio || msg.hasVideo) {
+      logger.info(`Received unsolicited media from user ${phone}. Suggesting upload flow.`);
+      const typeName = msg.hasVideo ? 'فيديو' : 'صوتي';
+      await msg.reply(`📥 استلمنا ملفك ${typeName}!\n\nإذا كنت تريد إضافته للمكتبة، أرسل كلمة *اضافة* أولاً ثم أرسل الملف.`);
+      return;
     }
 
     if (session.state !== 'IDLE') {
@@ -464,8 +521,14 @@ export async function handleMessage(sock, rawMsg) {
         case 'BROWSE_ALL':
           await userCommands.handleBrowseAll(sock, msg, body);
           return;
+        case 'AWAITING_MEDIA_TYPE':
+          await userCommands.handleMediaTypeSelection(sock, msg, body);
+          return;
         case 'AWAITING_AUDIO_UPLOAD':
           await msg.reply('❌ يرجى إرفاق الملف الصوتي الآن. لإلغاء العملية أرسل "القائمة".');
+          return;
+        case 'AWAITING_VIDEO_UPLOAD':
+          await msg.reply('❌ يرجى إرفاق ملف الفيديو الآن. لإلغاء العملية أرسل "القائمة".');
           return;
         case 'AWAITING_ADD_TITLE':
           await userCommands.handleAddTitle(sock, msg, session);
@@ -485,6 +548,26 @@ export async function handleMessage(sock, rawMsg) {
         case 'AWAITING_ADD_DESC':
           await userCommands.handleAddDescription(sock, msg, session);
           return;
+        case 'AWAITING_DELETE_CONFIRM': {
+          if (body === 'إلغاء') {
+            sessionService.clearSession(msg.from);
+            await msg.reply('✅ تم إلغاء الحذف.');
+            return;
+          }
+          if (body.startsWith('تأكيد حذف ')) {
+            const uuid = body.substring(9).trim();
+            sessionService.clearSession(msg.from);
+            return await adminCommands.confirmDelete(sock, msg, uuid);
+          }
+          await msg.reply('❌ أرسل `تأكيد حذف [الـ UUID]` للحذف أو `إلغاء` للإلغاء.');
+          return;
+        }
+        case 'AWAITING_REJECT_REASON': {
+          const rejectReqId = session.data.rejectRequestId;
+          const reason = body === 'تخطي' ? 'غير محدد' : body;
+          sessionService.clearSession(msg.from);
+          return await adminCommands.rejectRequest(sock, msg, rejectReqId, reason);
+        }
       }
     }
 
@@ -506,12 +589,16 @@ export async function handleMessage(sock, rawMsg) {
       if (body === 'إعادة بناء الفهرس' || body === 'تحديث الفهرس') return await adminCommands.rebuildCache(sock, msg);
       if (body === 'تنظيف الملفات المؤقتة' || body === 'تنظيف') return await adminCommands.cleanTempFiles(sock, msg);
       if (body === 'إعادة مزامنة Hugging Face' || body === 'مزامنة') return await adminCommands.resyncHf(sock, msg);
+      if (body.startsWith('إضافة تصنيف ')) return await adminCommands.addCategory(sock, msg, body.substring(12).trim());
+      if (body.startsWith('تعديل تصنيف ')) return await adminCommands.renameCategory(sock, msg, body.substring(12).trim());
+      if (body.startsWith('حذف تصنيف ')) return await adminCommands.removeCategory(sock, msg, body.substring(10).trim());
     }
 
     if (['بحث', 'البحث'].includes(cleanBody)) return await userCommands.promptSearch(sock, msg);
     if (['تصنيفات', 'التصنيفات'].includes(cleanBody)) return await userCommands.displayCategories(sock, msg);
     if (['جميع', 'جميع الصوتيات', 'كل الصوتيات'].includes(cleanBody)) return await userCommands.displayAllAudios(sock, msg);
     if (['جديد', 'أحدث الصوتيات', 'احدث الصوتيات'].includes(cleanBody)) return await userCommands.displayRecentAudios(sock, msg);
+    if (['جديد الاسبوع', 'جديد الأسبوع', 'new this week'].includes(cleanBody)) return await userCommands.displayNewThisWeek(sock, msg);
     if (['احصائيات', 'إحصائيات المكتبة', 'احصائيات المكتبة'].includes(cleanBody)) return await userCommands.displayLibraryStats(sock, msg);
     if (['مفضلة', 'المفضلة'].includes(cleanBody)) return await userCommands.displayFavorites(sock, msg);
     if (['اشتراك', 'الاشتراك'].includes(cleanBody)) return await userCommands.handleSubscribe(sock, msg);

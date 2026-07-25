@@ -47,7 +47,7 @@ export const cacheService = {
    * @returns {Array<object>}
    */
   getAudios() {
-    return audiosCache;
+    return [...audiosCache];
   },
 
   /**
