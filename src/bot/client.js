@@ -4,6 +4,7 @@ import qrcode from 'qrcode-terminal';
 import { handleMessage } from './handlers.js';
 import logger from '../utils/logger.js';
 import { hfSessionSync } from '../services/hfSessionSync.js';
+import { config } from '../config/index.js';
 
 export const msgStore = new Map();
 
