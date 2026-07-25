@@ -222,6 +222,8 @@ export const client = {
             // Ignore protocol messages or status broadcast
             if (!msg.message || msg.key.remoteJid === 'status@broadcast') continue;
 
+            logger.info(`[client] msg.fromMe=${msg.key.fromMe} remoteJid=${msg.key.remoteJid} type=${m.type} hasMsg=${!!msg.message}`);
+
             if (!msg.key.fromMe) {
               await handleMessage(sock, msg);
             } else {

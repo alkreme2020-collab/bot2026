@@ -329,6 +329,8 @@ export async function handleMessage(sock, rawMsg) {
   const isGroup = remoteJid.endsWith('@g.us');
   let phone = remoteJid.split('@')[0];
   
+  logger.info(`[handleMessage] ENTER remoteJid=${remoteJid} isGroup=${isGroup} phone=${phone}`);
+
   // Resolve LID to actual phone number if possible
   if (isLid) {
     const resolved = resolveLidToPhone(phone);
