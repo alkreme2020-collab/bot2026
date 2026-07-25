@@ -101,18 +101,15 @@ export async function initDatabase() {
     );
   `);
 
-  // Seed default categories from config if table is empty
-  const catCount = await db.get('SELECT COUNT(*) as count FROM categories');
-  if (catCount.count === 0) {
-    const defaultCats = config.categories;
-    for (let i = 0; i < defaultCats.length; i++) {
-      await db.run(
-        'INSERT OR IGNORE INTO categories (name, display_order) VALUES (?, ?)',
-        [defaultCats[i], i]
-      );
-    }
-    logger.info(`Seeded ${defaultCats.length} default categories.`);
+  // Seed default categories from config (always ensures they exist)
+  const defaultCats = config.categories;
+  for (let i = 0; i < defaultCats.length; i++) {
+    await db.run(
+      'INSERT OR IGNORE INTO categories (name, display_order) VALUES (?, ?)',
+      [defaultCats[i], i]
+    );
   }
+  logger.info(`Categories seeded/verified: ${defaultCats.length} categories.`);
 
   // Refresh config categories from database
   try {
