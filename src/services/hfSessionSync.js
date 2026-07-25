@@ -5,11 +5,14 @@ import { config } from '../config/index.js';
 import logger from '../utils/logger.js';
 
 const SESSION_FOLDER_IN_HF = 'whatsapp_session';
+const DB_FILE_IN_HF = 'database.sqlite';
 
 // Debounce: prevent uploading more than once every 2 minutes
 let uploadDebounceTimer = null;
 let lastUploadTime = 0;
 const UPLOAD_DEBOUNCE_MS = 2 * 60 * 1000; // 2 minutes
+let uploadDbTimer = null;
+let lastDbUploadTime = 0;
 
 /**
  * Download a single file using native fetch (handles all redirects automatically).
@@ -202,5 +205,67 @@ export const hfSessionSync = {
         logger.error(`[SessionSync] Could not clear HF session: ${fallbackErr.message}`);
       }
     }
+  },
+
+  /**
+   * Download the SQLite database file from HF Dataset to local path.
+   * Called once at startup BEFORE initDatabase so the persisted DB is used.
+   */
+  async downloadDatabase() {
+    if (!config.hfToken || !config.hfDataset) return;
+    const url = `https://huggingface.co/datasets/${config.hfDataset}/resolve/main/${DB_FILE_IN_HF}`;
+    logger.info(`[DBSync] Attempting to download database from HF...`);
+    try {
+      const ok = await downloadFile(url, config.dbPath);
+      if (ok) {
+        logger.info(`[DBSync] ✅ Database restored from HF.`);
+      } else {
+        logger.info(`[DBSync] No saved database on HF — starting fresh.`);
+      }
+    } catch (err) {
+      logger.warn(`[DBSync] Failed to download database: ${err.message}`);
+    }
+  },
+
+  /**
+   * Upload the local SQLite database file to HF Dataset.
+   * Debounced: will not upload more than once every 2 minutes.
+   */
+  async uploadDatabase() {
+    if (!config.hfToken || !config.hfDataset) return;
+    if (!fs.existsSync(config.dbPath)) return;
+
+    if (uploadDbTimer) clearTimeout(uploadDbTimer);
+
+    const now = Date.now();
+    const timeSinceLast = now - lastDbUploadTime;
+    const delay = timeSinceLast < UPLOAD_DEBOUNCE_MS
+      ? UPLOAD_DEBOUNCE_MS - timeSinceLast
+      : 0;
+
+    if (delay > 0) {
+      logger.info(`[DBSync] Upload scheduled in ${Math.round(delay / 1000)}s (debounced).`);
+    }
+
+    uploadDbTimer = setTimeout(async () => {
+      uploadDbTimer = null;
+      lastDbUploadTime = Date.now();
+
+      try {
+        const fileBuffer = fs.readFileSync(config.dbPath);
+        await uploadFiles({
+          repo: { type: 'dataset', name: config.hfDataset },
+          accessToken: config.hfToken,
+          files: [{
+            path: DB_FILE_IN_HF,
+            content: new Blob([fileBuffer])
+          }],
+          commitTitle: 'Update database'
+        });
+        logger.info(`[DBSync] ✅ Database synced to HF (${(fileBuffer.length / 1024).toFixed(1)} KB).`);
+      } catch (err) {
+        logger.error(`[DBSync] Failed to upload database: ${err.message}`);
+      }
+    }, delay);
   }
 };

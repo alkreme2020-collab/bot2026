@@ -3,6 +3,7 @@ import QRCode from 'qrcode';
 import { initDatabase } from './database/connection.js';
 import { cacheService } from './services/cacheService.js';
 import { client, latestQr, latestPairingCode } from './bot/client.js';
+import { hfSessionSync } from './services/hfSessionSync.js';
 import { config } from './config/index.js';
 import logger from './utils/logger.js';
 
@@ -111,10 +112,16 @@ async function startApp() {
   try {
     logger.info('Bootstrapping Arabic WhatsApp Audio Library (Version 2.0)...');
 
-    // 1. Initialize Database connection and verify schemas
+    // 1. Download persisted database from Hugging Face (if available)
+    await hfSessionSync.downloadDatabase();
+
+    // 2. Initialize Database connection and verify schemas
     await initDatabase();
 
-    // 2. Initialize in-memory Audios Cache index
+    // 3. Upload database immediately to ensure HF has the latest copy
+    await hfSessionSync.uploadDatabase();
+
+    // 4. Initialize in-memory Audios Cache index
     await cacheService.init();
 
     // 3. Start HTTP Express Server (Used for keep-alive health pings)
@@ -135,6 +142,13 @@ async function startApp() {
         }
       }, KEEP_ALIVE_INTERVAL_MS);
       logger.info(`[KeepAlive] Self-ping enabled every ${KEEP_ALIVE_INTERVAL_MS / 60000} minutes.`);
+
+      // ─── Periodic Database Sync to HF (every 5 minutes) ────────────
+      setInterval(async () => {
+        await hfSessionSync.uploadDatabase();
+      }, 5 * 60 * 1000);
+      logger.info(`[DBSync] Periodic database sync enabled every 5 minutes.`);
+      // ─────────────────────────────────────────────────────────────────
       // ─────────────────────────────────────────────────────────────────────
     });
 

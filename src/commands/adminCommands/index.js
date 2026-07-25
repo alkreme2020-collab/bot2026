@@ -10,6 +10,7 @@ import { sessionService } from '../../services/sessionService.js';
 import logger, { dbLog } from '../../utils/logger.js';
 import { formatBytes, userCommands } from '../userCommands.js';
 import { phoneToJid } from '../../utils/jidHelper.js';
+import { hfSessionSync } from '../../services/hfSessionSync.js';
 
 /**
  * Helper to compute SHA256 checksum of a file.
@@ -151,7 +152,10 @@ export const adminCommands = {
       // 10. Refresh audios cache
       await cacheService.refresh();
 
-      // 11. Notify subscribers
+      // 11. Persist database to Hugging Face
+      await hfSessionSync.uploadDatabase();
+
+      // 12. Notify subscribers
       const mediaData = {
         title: req.title,
         presenter: req.presenter,
@@ -335,6 +339,9 @@ export const adminCommands = {
       await dbService.deleteAudio(uuid);
       await cacheService.refresh();
 
+      // Persist database to Hugging Face
+      await hfSessionSync.uploadDatabase();
+
       const typeLabel = (audio.media_type || 'audio') === 'video' ? 'فيديو' : 'صوتية';
       await msg.reply(`✅ تم حذف ${typeLabel} *(${audio.title})* نهائياً من قاعدة البيانات و Hugging Face.`);
 
@@ -400,6 +407,7 @@ export const adminCommands = {
 
       await dbService.updateAudio(uuid, updates);
       await cacheService.refresh();
+      await hfSessionSync.uploadDatabase();
 
       await dbLog('AUDIO_EDITED', `Admin edited audio ${uuid}: ${JSON.stringify(updates)}`);
       await msg.reply(`✅ تم تعديل بيانات صوتية *(${audio.title})* وتحديث الفهرس بنجاح.`);
