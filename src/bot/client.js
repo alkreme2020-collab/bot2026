@@ -117,6 +117,26 @@ export const client = {
           scheduleReconnect();
         } else {
           logger.error('[Connection] ❌ Logged out permanently. Clearing session to allow fresh login…');
+
+          // ─── Notify admin on Telegram-style WhatsApp alert ─────────────
+          // Try to send a WhatsApp message to admin before session is cleared
+          if (config.adminNumber) {
+            try {
+              const adminJid = `${config.adminNumber}@s.whatsapp.net`;
+              await sock.sendMessage(adminJid, {
+                text: `⚠️ *تنبيه عاجل — البوت تم تسجيل خروجه!*\n\n` +
+                      `تم فصل البوت من واتساب بشكل نهائي.\n` +
+                      `📌 *الإجراء المطلوب:*\n` +
+                      `افتح الرابط التالي وأعد ربط الحساب:\n` +
+                      `https://bot2026-yzln.onrender.com`
+              });
+              logger.info('[Connection] Admin logout alert sent successfully.');
+            } catch (alertErr) {
+              logger.warn(`[Connection] Could not send admin logout alert: ${alertErr.message}`);
+            }
+          }
+          // ────────────────────────────────────────────────────────────────
+
           latestPairingCode = null;
           latestQr = null;
           isRequestingPairing = false;
@@ -149,6 +169,24 @@ export const client = {
         } catch (e) {
           logger.warn(`Could not set presence: ${e.message}`);
         }
+
+        // ─── Notify admin on successful connection ───────────────────────
+        if (config.adminNumber) {
+          try {
+            const adminJid = `${config.adminNumber}@s.whatsapp.net`;
+            const now = new Date().toLocaleString('ar-YE', { timeZone: 'Asia/Aden' });
+            await sock.sendMessage(adminJid, {
+              text: `✅ *البوت متصل ويعمل بشكل طبيعي*\n\n` +
+                    `🕐 وقت الاتصال: ${now}\n` +
+                    `📱 الحساب: ${sock.user?.id || 'غير محدد'}`
+            });
+            logger.info('[Connection] Admin connect notification sent.');
+          } catch (notifyErr) {
+            logger.warn(`[Connection] Could not send admin connect notification: ${notifyErr.message}`);
+          }
+        }
+        // ────────────────────────────────────────────────────────────────
+
         // Upload session to HF immediately after successful connection
         await hfSessionSync.uploadSession(authDir);
       }
