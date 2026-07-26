@@ -322,7 +322,7 @@ function detectVideoMessage(rawMsg) {
  * @param {object} rawMsg
  */
 export async function handleMessage(sock, rawMsg) {
-  let remoteJid = rawMsg.key.remoteJid;
+  const remoteJid = rawMsg.key.remoteJid;
   if (!remoteJid || remoteJid === 'status@broadcast') return;
 
   const isLid = remoteJid.endsWith('@lid');
@@ -335,7 +335,6 @@ export async function handleMessage(sock, rawMsg) {
     if (resolved) {
       logger.info(`Resolved LID ${phone} -> phone ${resolved}`);
       phone = resolved;
-      remoteJid = `${resolved}@s.whatsapp.net`;
     }
   }
   
