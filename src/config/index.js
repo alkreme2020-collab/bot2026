@@ -44,10 +44,6 @@ export const config = {
   rateLimitMs: parseInt(process.env.RATE_LIMIT_MS, 10) || 1000,
   requestCooldownMs: parseInt(process.env.REQUEST_COOLDOWN_MS, 10) || 180000,
   dbPath: path.join(rootDir, 'database.sqlite'),
-  categories: [
-    'خطب',
-    'محاضرات',
-    'دورة مهمات الشريعة',
-    'مقتطفات',
-  ]
+  // Populated at runtime from the database (see database/connection.js)
+  categories: []
 };

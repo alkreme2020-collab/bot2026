@@ -101,15 +101,20 @@ export async function initDatabase() {
     );
   `);
 
-  // Seed default categories from config (always ensures they exist)
-  const defaultCats = config.categories;
-  for (let i = 0; i < defaultCats.length; i++) {
-    await db.run(
-      'INSERT OR IGNORE INTO categories (name, display_order) VALUES (?, ?)',
-      [defaultCats[i], i]
-    );
+  // Seed default categories only on first run (when table is empty)
+  const catCount = await db.get('SELECT COUNT(*) as count FROM categories');
+  if (catCount.count === 0) {
+    const defaultCats = ['خطب', 'محاضرات', 'دورة مهمات الشريعة', 'مقتطفات'];
+    for (let i = 0; i < defaultCats.length; i++) {
+      await db.run(
+        'INSERT INTO categories (name, display_order) VALUES (?, ?)',
+        [defaultCats[i], i]
+      );
+    }
+    logger.info(`Categories seeded for the first time: ${defaultCats.length} categories.`);
+  } else {
+    logger.info(`Categories table already has ${catCount.count} entries — skipping seed.`);
   }
-  logger.info(`Categories seeded/verified: ${defaultCats.length} categories.`);
 
   // Refresh config categories from database
   try {

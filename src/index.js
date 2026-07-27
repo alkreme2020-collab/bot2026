@@ -112,9 +112,6 @@ async function startApp() {
   try {
     logger.info('Bootstrapping Arabic WhatsApp Audio Library (Version 2.0)...');
 
-    // 0. Clear saved session from Hugging Face to force new QR
-    await hfSessionSync.clearSession();
-
     // 1. Download persisted database from Hugging Face (if available)
     await hfSessionSync.downloadDatabase();
 
