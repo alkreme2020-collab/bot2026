@@ -82,7 +82,7 @@ export const userCommands = {
    * @param {string} query
    */
   async executeSearch(client, msg, query) {
-    await client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
+    client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
     const results = searchService.search(query);
     const limit = Math.min(results.length, 6); // limit results
     
@@ -123,7 +123,7 @@ export const userCommands = {
    * @param {boolean} [skipTextReply=false]
    */
   async displayCategories(client, msg) {
-    await client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
+    client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
     sessionService.setSession(msg.from, 'AWAITING_CATEGORY_BROWSE');
 
     const categoriesList = config.categories.map((cat, idx) => `${idx + 1}️⃣ ${cat}`).join('\n');
@@ -383,7 +383,7 @@ export const userCommands = {
    * @param {object} msg
    */
   async displayAllAudios(client, msg) {
-    await client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
+    client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
     const allAudios = cacheService.getAudios();
     if (allAudios.length === 0) {
       await msg.reply('📭 المكتبة لا تحتوي على صوتيات بعد.');
@@ -498,7 +498,7 @@ export const userCommands = {
    * @param {object} msg
    */
   async displayRecentAudios(client, msg) {
-    await client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
+    client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
     const audios = cacheService.getAudios().slice(0, 5); // top 5 recent
 
     if (audios.length === 0) {
@@ -529,7 +529,7 @@ export const userCommands = {
    * @param {object} msg
    */
   async displayNewThisWeek(client, msg) {
-    await client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
+    client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
     try {
       const audios = await dbService.getAudiosThisWeek();
       if (audios.length === 0) {
@@ -584,7 +584,7 @@ export const userCommands = {
    * @param {object} msg
    */
   async displayFavorites(client, msg) {
-    await client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
+    client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
     try {
       const favs = await dbService.getUserFavorites(msg.from);
       if (favs.length === 0) {
@@ -727,7 +727,7 @@ ${audio.location ? `📍 *المكان:* ${audio.location}\n` : ''}${audio.date_
    */
   async downloadAudio(client, msg, uuid) {
     try {
-      await client.sendPresenceUpdate('recording', msg.remoteJid).catch(() => {});
+      client.sendPresenceUpdate('recording', msg.remoteJid).catch(() => {});
       
       // Save to session so we can add it to favorites later if requested
       const session = sessionService.getSession(msg.from);
