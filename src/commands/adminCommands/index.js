@@ -153,7 +153,7 @@ export const adminCommands = {
       await cacheService.refresh();
 
       // 11. Persist database to Hugging Face
-      await hfSessionSync.uploadDatabase();
+      await hfSessionSync.forceUploadDatabase();
 
       // 12. Notify subscribers
       const mediaData = {
@@ -340,7 +340,7 @@ export const adminCommands = {
       await cacheService.refresh();
 
       // Persist database to Hugging Face
-      await hfSessionSync.uploadDatabase();
+      await hfSessionSync.forceUploadDatabase();
 
       const typeLabel = (audio.media_type || 'audio') === 'video' ? 'فيديو' : 'صوتية';
       await msg.reply(`✅ تم حذف ${typeLabel} *(${audio.title})* نهائياً من قاعدة البيانات و Hugging Face.`);
@@ -407,7 +407,7 @@ export const adminCommands = {
 
       await dbService.updateAudio(uuid, updates);
       await cacheService.refresh();
-      await hfSessionSync.uploadDatabase();
+      await hfSessionSync.forceUploadDatabase();
 
       await dbLog('AUDIO_EDITED', `Admin edited audio ${uuid}: ${JSON.stringify(updates)}`);
       await msg.reply(`✅ تم تعديل بيانات صوتية *(${audio.title})* وتحديث الفهرس بنجاح.`);
@@ -493,8 +493,8 @@ export const adminCommands = {
           
           await client.sendMessage(phoneToJid(user.phone), { text: `📢 *رسالة جماعية من إدارة مكتبة الصوتيات:*\n\n${text}` });
           successCount++;
-          // Small delay to prevent WhatsApp blocking
-          await new Promise(r => setTimeout(r, 300));
+          // Delay 3s between messages to avoid WhatsApp ban
+          await new Promise(r => setTimeout(r, 3000));
         } catch (err) {
           logger.warn(`Failed to send broadcast to ${user.phone}: ${err.message}`);
         }

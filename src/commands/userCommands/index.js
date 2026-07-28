@@ -82,6 +82,7 @@ export const userCommands = {
    * @param {string} query
    */
   async executeSearch(client, msg, query) {
+    await client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
     const results = searchService.search(query);
     const limit = Math.min(results.length, 6); // limit results
     
@@ -122,6 +123,7 @@ export const userCommands = {
    * @param {boolean} [skipTextReply=false]
    */
   async displayCategories(client, msg) {
+    await client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
     sessionService.setSession(msg.from, 'AWAITING_CATEGORY_BROWSE');
 
     const categoriesList = config.categories.map((cat, idx) => `${idx + 1}️⃣ ${cat}`).join('\n');
@@ -381,6 +383,7 @@ export const userCommands = {
    * @param {object} msg
    */
   async displayAllAudios(client, msg) {
+    await client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
     const allAudios = cacheService.getAudios();
     if (allAudios.length === 0) {
       await msg.reply('📭 المكتبة لا تحتوي على صوتيات بعد.');
@@ -495,6 +498,7 @@ export const userCommands = {
    * @param {object} msg
    */
   async displayRecentAudios(client, msg) {
+    await client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
     const audios = cacheService.getAudios().slice(0, 5); // top 5 recent
 
     if (audios.length === 0) {
@@ -525,6 +529,7 @@ export const userCommands = {
    * @param {object} msg
    */
   async displayNewThisWeek(client, msg) {
+    await client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
     try {
       const audios = await dbService.getAudiosThisWeek();
       if (audios.length === 0) {
@@ -579,6 +584,7 @@ export const userCommands = {
    * @param {object} msg
    */
   async displayFavorites(client, msg) {
+    await client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
     try {
       const favs = await dbService.getUserFavorites(msg.from);
       if (favs.length === 0) {
@@ -663,7 +669,7 @@ ${audio.location ? `📍 *المكان:* ${audio.location}\n` : ''}${audio.date_
         try {
           await client.sendMessage(phoneToJid(phone), { text: caption });
           sent++;
-          await new Promise(r => setTimeout(r, 1500));
+          await new Promise(r => setTimeout(r, 2500));
         } catch (err) {
           logger.warn(`Failed to notify subscriber ${phone}: ${err.message}`);
         }
@@ -721,6 +727,12 @@ ${audio.location ? `📍 *المكان:* ${audio.location}\n` : ''}${audio.date_
    */
   async downloadAudio(client, msg, uuid) {
     try {
+      await client.sendPresenceUpdate('recording', msg.remoteJid).catch(() => {});
+      
+      // Save to session so we can add it to favorites later if requested
+      const session = sessionService.getSession(msg.from);
+      sessionService.setSession(msg.from, session.state, { lastDownloadedUuid: uuid });
+
       const audio = await dbService.getAudioByUuid(uuid);
       if (!audio) {
         await msg.reply('❌ عذراً، لم نجد هذه الصوتية في نظامنا.');
@@ -741,11 +753,21 @@ ${audio.location ? `📍 *المكان:* ${audio.location}\n` : ''}${audio.date_
       const tempFilename = `download_${uuidv4()}${ext}`;
       const tempPath = path.join(config.rootDir, 'temp', tempFilename);
       
-      const response = await fetch(audio.hf_url, {
-        headers: {
-          'Authorization': `Bearer ${config.hfToken}`
-        }
-      });
+      // Add 60-second timeout to prevent hanging on slow/dead HF servers
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000);
+      
+      let response;
+      try {
+        response = await fetch(audio.hf_url, {
+          headers: {
+            'Authorization': `Bearer ${config.hfToken}`
+          },
+          signal: controller.signal
+        });
+      } finally {
+        clearTimeout(timeoutId);
+      }
 
       if (!response.ok) {
         throw new Error(`HF server returned HTTP status ${response.status}`);
@@ -784,6 +806,22 @@ ${audio.location ? `- *المكان:* ${audio.location}\n` : ''}${audio.date_hij
           fileName: `${cleanTitle}${ext}`,
           caption
         }, { quoted: msg.raw });
+      }
+
+      // Send Contextual Poll
+      try {
+        const sentPoll = await client.sendMessage(msg.remoteJid, {
+          poll: {
+            name: '✨ إجراء سريع:',
+            values: ['⭐ إضافة للمفضلة', '🔍 إجراء بحث جديد', '🔙 العودة للقائمة الرئيسية'],
+            selectableCount: 1
+          }
+        });
+        if (sentPoll?.key?.id && sentPoll.message) {
+          msgStore.set(sentPoll.key.id, sentPoll.message);
+        }
+      } catch (err) {
+        logger.warn(`Could not send contextual poll: ${err.message}`);
       }
 
       // Cleanup

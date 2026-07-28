@@ -23,4 +23,17 @@ export const recentPollSent = {
   clear(phone) {
     recent.delete(phone);
   },
+
+  /** Remove all expired entries. */
+  sweep() {
+    const now = Date.now();
+    for (const [phone, item] of recent.entries()) {
+      if (now - item.ts > item.ttl) {
+        recent.delete(phone);
+      }
+    }
+  },
 };
+
+// Auto-sweep expired entries every 2 minutes
+setInterval(() => recentPollSent.sweep(), 2 * 60 * 1000);

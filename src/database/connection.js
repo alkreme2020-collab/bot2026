@@ -162,3 +162,15 @@ export function getDb() {
   }
   return db;
 }
+
+export async function closeDatabase() {
+  if (db) {
+    try {
+      await db.close();
+      logger.info('Database connection closed.');
+    } catch (err) {
+      logger.error(`Error closing database: ${err.message}`);
+    }
+    db = null;
+  }
+}

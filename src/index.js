@@ -1,9 +1,12 @@
 import express from 'express';
 import QRCode from 'qrcode';
-import { initDatabase } from './database/connection.js';
+import { initDatabase, closeDatabase } from './database/connection.js';
 import { cacheService } from './services/cacheService.js';
 import { client, latestQr, latestPairingCode } from './bot/client.js';
 import { hfSessionSync } from './services/hfSessionSync.js';
+import { sessionService } from './services/sessionService.js';
+import { dbService } from './services/dbService.js';
+import { cleanupHandlerMaps } from './bot/handlers.js';
 import { config } from './config/index.js';
 import logger from './utils/logger.js';
 
@@ -106,6 +109,37 @@ app.get(['/', '/qr', '/code', '/pair'], async (req, res) => {
 });
 
 /**
+ * Graceful shutdown: close DB, sync to HF, and stop services.
+ * @param {string} signal - The signal that triggered the shutdown
+ */
+async function gracefulShutdown(signal) {
+  logger.info(`${signal} signal received. Starting graceful shutdown...`);
+
+  // 1. Stop periodic cleanups
+  cacheService.destroy();
+  sessionService.destroy();
+
+  // 2. Force upload latest database to HF before shutting down
+  try {
+    logger.info('[Shutdown] Uploading latest database to HF...');
+    await hfSessionSync.forceUploadDatabase();
+    logger.info('[Shutdown] Database synced to HF successfully.');
+  } catch (err) {
+    logger.error(`[Shutdown] Failed to sync database to HF: ${err.message}`);
+  }
+
+  // 3. Close database connection
+  try {
+    await closeDatabase();
+  } catch (err) {
+    logger.error(`[Shutdown] Failed to close database: ${err.message}`);
+  }
+
+  logger.info('[Shutdown] Graceful shutdown complete. Exiting.');
+  process.exit(0);
+}
+
+/**
  * Bootstrap the entire application.
  */
 async function startApp() {
@@ -124,35 +158,64 @@ async function startApp() {
     // 4. Initialize in-memory Audios Cache index
     await cacheService.init();
 
-    // 3. Start HTTP Express Server (Used for keep-alive health pings)
+    // 5. Initialize session cleanup intervals
+    sessionService.init();
+
+    // 6. Start HTTP Express Server (Used for keep-alive health pings)
     app.listen(config.port, () => {
       logger.info(`Express health server listening on port ${config.port}`);
 
-      // ─── Self Keep-Alive Ping (Prevents Render free-tier sleep) ──────────
+      // ─── Keep-Alive Ping (Prevents Render free-tier sleep) ──────────────
       // Render shuts down free services after 15 minutes of inactivity.
-      // We ping our own health endpoint every 14 minutes to stay alive.
+      // We ping our health endpoint every 14 minutes to stay alive.
+      // Uses the public RENDER_URL if available (external ping is more reliable).
       const KEEP_ALIVE_INTERVAL_MS = 14 * 60 * 1000; // 14 minutes
       setInterval(async () => {
         try {
-          const url = `http://localhost:${config.port}/health`;
+          const url = config.renderUrl
+            ? `${config.renderUrl}/health`
+            : `http://localhost:${config.port}/health`;
           const res = await fetch(url);
-          logger.info(`[KeepAlive] Self-ping OK — status=${res.status}`);
+          logger.info(`[KeepAlive] Ping OK — url=${url}, status=${res.status}`);
         } catch (err) {
-          logger.warn(`[KeepAlive] Self-ping failed: ${err.message}`);
+          logger.warn(`[KeepAlive] Ping failed: ${err.message}`);
         }
       }, KEEP_ALIVE_INTERVAL_MS);
-      logger.info(`[KeepAlive] Self-ping enabled every ${KEEP_ALIVE_INTERVAL_MS / 60000} minutes.`);
+      logger.info(`[KeepAlive] Ping enabled every ${KEEP_ALIVE_INTERVAL_MS / 60000} minutes.`);
 
-      // ─── Periodic Database Sync to HF (every 5 minutes) ────────────
+      // ─── Periodic Database Sync to HF (every 5 minutes) ────────────────
       setInterval(async () => {
         await hfSessionSync.uploadDatabase();
       }, 5 * 60 * 1000);
       logger.info(`[DBSync] Periodic database sync enabled every 5 minutes.`);
-      // ─────────────────────────────────────────────────────────────────
-      // ─────────────────────────────────────────────────────────────────────
+
+      // ─── Periodic Memory Cleanup (every 5 minutes) ─────────────────────
+      setInterval(() => {
+        try {
+          cleanupHandlerMaps();
+        } catch (err) {
+          logger.warn(`[Cleanup] Handler maps cleanup failed: ${err.message}`);
+        }
+      }, 5 * 60 * 1000);
+      logger.info(`[Cleanup] Periodic memory cleanup enabled every 5 minutes.`);
+
+      // ─── Periodic DB Table Cleanup (every 24 hours) ────────────────────
+      setInterval(async () => {
+        try {
+          const logsDeleted = await dbService.cleanOldLogs(30);
+          const downloadsDeleted = await dbService.cleanOldDownloads(90);
+          if (logsDeleted > 0 || downloadsDeleted > 0) {
+            logger.info(`[Cleanup] DB cleanup: ${logsDeleted} old logs, ${downloadsDeleted} old downloads removed.`);
+          }
+        } catch (err) {
+          logger.warn(`[Cleanup] DB table cleanup failed: ${err.message}`);
+        }
+      }, 24 * 60 * 60 * 1000);
+      logger.info(`[Cleanup] DB table cleanup scheduled every 24 hours.`);
+      // ──────────────────────────────────────────────────────────────────────
     });
 
-    // 4. Connect to WhatsApp Web
+    // 7. Connect to WhatsApp Web
     logger.info('Connecting to WhatsApp Web interface...');
     await client.initialize();
 
@@ -162,18 +225,27 @@ async function startApp() {
   }
 }
 
-// Handle termination signals
-process.on('SIGINT', async () => {
-  logger.info('SIGINT signal received. Closing resources...');
-  cacheService.destroy();
-  process.exit(0);
+// ─── Global Error Handlers ──────────────────────────────────────────────────
+// Prevent the bot from crashing on unhandled errors
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error(`Unhandled Promise Rejection: ${reason?.stack || reason}`);
+  // Don't exit — let the bot continue running
 });
 
-process.on('SIGTERM', async () => {
-  logger.info('SIGTERM signal received. Closing resources...');
-  cacheService.destroy();
-  process.exit(0);
+process.on('uncaughtException', (err) => {
+  logger.error(`Uncaught Exception: ${err.stack || err.message}`);
+  // For truly fatal errors, exit after logging
+  if (err.message?.includes('ENOMEM') || err.message?.includes('out of memory')) {
+    logger.error('Fatal memory error — exiting.');
+    process.exit(1);
+  }
+  // Otherwise, try to keep running
 });
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Handle termination signals
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
 // Start application
 startApp();

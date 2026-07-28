@@ -5,6 +5,7 @@ import logger from '../utils/logger.js';
 // In-memory store for interactive state sessions and message times
 const sessions = new Map();
 const lastMessageTimes = new Map();
+let cleanupIntervalId = null;
 
 export const sessionService = {
   /**
@@ -88,5 +89,54 @@ export const sessionService = {
    */
   clearSession(phone) {
     sessions.delete(phone);
+  },
+
+  /**
+   * Initialize periodic cleanup of stale sessions and rate limit entries.
+   * Call once at startup.
+   */
+  init() {
+    if (cleanupIntervalId) clearInterval(cleanupIntervalId);
+    // Run cleanup every 5 minutes
+    cleanupIntervalId = setInterval(() => {
+      this.cleanup();
+    }, 5 * 60 * 1000);
+  },
+
+  /**
+   * Remove stale sessions (idle > 30 min) and old rate limit entries (> 5 min).
+   */
+  cleanup() {
+    const now = Date.now();
+    const SESSION_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes
+    const RATE_LIMIT_MAX_AGE_MS = 5 * 60 * 1000; // 5 minutes
+
+    // Clean stale sessions — we can't track last activity easily,
+    // so we limit total size as a safety valve
+    if (sessions.size > 200) {
+      const keysToDelete = [];
+      for (const key of sessions.keys()) {
+        keysToDelete.push(key);
+        if (sessions.size - keysToDelete.length <= 100) break;
+      }
+      keysToDelete.forEach(k => sessions.delete(k));
+    }
+
+    // Clean old rate limit timestamps
+    for (const [phone, time] of lastMessageTimes.entries()) {
+      if (now - time > RATE_LIMIT_MAX_AGE_MS) {
+        lastMessageTimes.delete(phone);
+      }
+    }
+  },
+
+  /**
+   * Stop the periodic cleanup interval.
+   */
+  destroy() {
+    if (cleanupIntervalId) {
+      clearInterval(cleanupIntervalId);
+      cleanupIntervalId = null;
+    }
   }
 };

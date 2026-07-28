@@ -119,24 +119,8 @@ export const client = {
         } else {
           logger.error('[Connection] ❌ Logged out permanently. Clearing session to allow fresh login…');
 
-          // ─── Notify admin on Telegram-style WhatsApp alert ─────────────
-          // Try to send a WhatsApp message to admin before session is cleared
-          if (config.adminNumber) {
-            try {
-              const adminJid = `${config.adminNumber}@s.whatsapp.net`;
-              await sock.sendMessage(adminJid, {
-                text: `⚠️ *تنبيه عاجل — البوت تم تسجيل خروجه!*\n\n` +
-                      `تم فصل البوت من واتساب بشكل نهائي.\n` +
-                      `📌 *الإجراء المطلوب:*\n` +
-                      `افتح الرابط التالي وأعد ربط الحساب:\n` +
-                      `https://bot2026-yzln.onrender.com`
-              });
-              logger.info('[Connection] Admin logout alert sent successfully.');
-            } catch (alertErr) {
-              logger.warn(`[Connection] Could not send admin logout alert: ${alertErr.message}`);
-            }
-          }
-          // ────────────────────────────────────────────────────────────────
+          // Note: Cannot send admin logout alert here — socket is already disconnected.
+          logger.warn('[Connection] ❌ Bot logged out. Socket is closed, cannot notify admin via WhatsApp.');
 
           // ─── Clear invalid session from HuggingFace FIRST ───────────────
           // This prevents the restart loop: invalid HF session → download → reject → loop
@@ -212,10 +196,15 @@ export const client = {
             if (msg.key?.id && msg.message) {
               msgStore.set(msg.key.id, msg.message);
               logger.info(`Stored message in msgStore. ID: ${msg.key.id}, Keys: ${Object.keys(msg.message).join(', ')}`);
-              // Maintain max size 500 in msgStore to avoid memory growth
-              if (msgStore.size > 500) {
-                const firstKey = msgStore.keys().next().value;
-                msgStore.delete(firstKey);
+              // Maintain max size 300 in msgStore to avoid memory growth
+              if (msgStore.size > 300) {
+                // Delete oldest 50 entries in batch to reduce frequent deletions
+                const keysToDelete = [];
+                for (const k of msgStore.keys()) {
+                  keysToDelete.push(k);
+                  if (keysToDelete.length >= 50) break;
+                }
+                keysToDelete.forEach(k => msgStore.delete(k));
               }
             }
 

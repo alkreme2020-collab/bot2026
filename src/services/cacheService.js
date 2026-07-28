@@ -43,11 +43,12 @@ export const cacheService = {
   },
 
   /**
-   * Return the array of cached audios
+   * Return the cached audios array (read-only reference).
+   * Callers MUST NOT mutate the returned array or its objects.
    * @returns {Array<object>}
    */
   getAudios() {
-    return [...audiosCache];
+    return audiosCache;
   },
 
   /**

@@ -434,7 +434,7 @@ export const dbService = {
     const audios = await db.get('SELECT COUNT(*) as count FROM audios');
     const users = await db.get('SELECT COUNT(*) as count FROM users');
     const downloads = await db.get('SELECT COUNT(*) as count FROM downloads');
-    const requests = await db.get('SELECT COUNT(*) as count FROM requests');
+    const requests = await db.get("SELECT COUNT(*) as count FROM requests WHERE status = 'WAITING'");
     
     return {
       totalAudios: audios.count,
@@ -512,5 +512,33 @@ export const dbService = {
        LIMIT ?`,
       [limit]
     );
+  },
+
+  /**
+   * Delete log entries older than the specified number of days.
+   * @param {number} [daysToKeep=30]
+   * @returns {Promise<number>} Number of deleted rows
+   */
+  async cleanOldLogs(daysToKeep = 30) {
+    const db = getDb();
+    const result = await db.run(
+      `DELETE FROM logs WHERE date < datetime('now', '-' || ? || ' days')`,
+      [daysToKeep]
+    );
+    return result.changes || 0;
+  },
+
+  /**
+   * Delete download records older than the specified number of days.
+   * @param {number} [daysToKeep=90]
+   * @returns {Promise<number>} Number of deleted rows
+   */
+  async cleanOldDownloads(daysToKeep = 90) {
+    const db = getDb();
+    const result = await db.run(
+      `DELETE FROM downloads WHERE download_time < datetime('now', '-' || ? || ' days')`,
+      [daysToKeep]
+    );
+    return result.changes || 0;
   }
 };

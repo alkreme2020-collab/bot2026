@@ -267,5 +267,38 @@ export const hfSessionSync = {
         logger.error(`[DBSync] Failed to upload database: ${err.message}`);
       }
     }, delay);
+  },
+
+  /**
+   * Force upload the database immediately, bypassing debounce.
+   * Use for critical operations like approve/delete where data loss is unacceptable.
+   */
+  async forceUploadDatabase() {
+    if (!config.hfToken || !config.hfDataset) return;
+    if (!fs.existsSync(config.dbPath)) return;
+
+    // Cancel any pending debounced upload
+    if (uploadDbTimer) {
+      clearTimeout(uploadDbTimer);
+      uploadDbTimer = null;
+    }
+
+    lastDbUploadTime = Date.now();
+
+    try {
+      const fileBuffer = fs.readFileSync(config.dbPath);
+      await uploadFiles({
+        repo: { type: 'dataset', name: config.hfDataset },
+        accessToken: config.hfToken,
+        files: [{
+          path: DB_FILE_IN_HF,
+          content: new Blob([fileBuffer])
+        }],
+        commitTitle: 'Force update database (critical operation)'
+      });
+      logger.info(`[DBSync] ✅ Database force-synced to HF (${(fileBuffer.length / 1024).toFixed(1)} KB).`);
+    } catch (err) {
+      logger.error(`[DBSync] Force upload failed: ${err.message}`);
+    }
   }
 };

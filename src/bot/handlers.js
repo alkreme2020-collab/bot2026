@@ -15,6 +15,19 @@ import { msgStore } from './client.js';
 const lastWarningTimes = new Map();
 
 /**
+ * Convert Arabic/Indic numerals to Western Arabic numerals
+ */
+function convertArabicNumerals(str) {
+  if (!str) return str;
+  const arabicNumbers = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
+  let result = str;
+  for (let i = 0; i < 10; i++) {
+    result = result.replace(new RegExp(arabicNumbers[i], 'g'), i.toString());
+  }
+  return result;
+}
+
+/**
  * Extract text body or selected poll/button value from raw Baileys message object
  * @param {object} rawMsg 
  * @param {string} [meId]
@@ -232,7 +245,8 @@ function extractMessageBody(rawMsg, botUser = {}, resolvedPhone = '') {
  */
 function resolveLidToPhone(lidNumber) {
   try {
-    const mappingFile = path.join(process.cwd(), '.baileys_auth', `lid-mapping-${lidNumber}_reverse.json`);
+    const authDir = process.env.AUTH_DIR || path.join(process.cwd(), '.baileys_auth');
+    const mappingFile = path.join(authDir, `lid-mapping-${lidNumber}_reverse.json`);
     if (fs.existsSync(mappingFile)) {
       const raw = fs.readFileSync(mappingFile, 'utf-8');
       const data = JSON.parse(raw);
@@ -392,6 +406,8 @@ export async function handleMessage(sock, rawMsg) {
     let body = extractMessageBody(rawMsg, sock.user || {}, phone);
     // Strip markdown backticks that users might accidentally copy-paste from bot responses
     body = body.replace(/`/g, '').trim();
+    // Convert Arabic numerals to standard English numbers
+    body = convertArabicNumerals(body);
 
     // Skip echo suppression for poll votes — they are genuine user selections, not echoes
     const isPollVote = rawMsg.isPollSelection || rawMsg.message?.pollUpdateMessage;
@@ -419,7 +435,10 @@ export async function handleMessage(sock, rawMsg) {
       'إحصائيات المكتبة': 'احصائيات',
       '➡️ التالي': 'التالي',
       '⬅️ السابق': 'السابق',
-      '🔙 القائمة الرئيسية': 'قائمة'
+      '🔙 القائمة الرئيسية': 'قائمة',
+      '🔙 العودة للقائمة الرئيسية': 'قائمة',
+      '🔍 إجراء بحث جديد': 'بحث',
+      '⭐ إضافة للمفضلة': 'مفضلة_اخر_صوتية'
     };
 
     if (pollMap[body]) {
@@ -455,9 +474,18 @@ export async function handleMessage(sock, rawMsg) {
     }
 
     const cleanBody = body.toLowerCase().trim();
-    if (['/start', 'ابدأ', 'البداية', 'القائمة', 'قائمة'].includes(cleanBody)) {
+    if (['/start', 'ابدأ', 'البداية', 'القائمة', 'قائمة', 'الرئيسية', 'رجوع', 'عودة'].includes(cleanBody)) {
       sessionService.clearSession(phone);
       return await userCommands.handleStart(sock, msg);
+    }
+
+    if (body === 'مفضلة_اخر_صوتية') {
+      const lastUuid = session.data.lastDownloadedUuid;
+      if (lastUuid) {
+        return await userCommands.addToFavorites(sock, msg, lastUuid);
+      } else {
+        return await msg.reply('❌ لم يتم العثور على آخر صوتية قمت بتحميلها.');
+      }
     }
 
     // Handle incoming media files (audio/video)
@@ -594,15 +622,15 @@ export async function handleMessage(sock, rawMsg) {
       if (body.startsWith('حذف تصنيف ')) return await adminCommands.removeCategory(sock, msg, body.substring(10).trim());
     }
 
-    if (['بحث', 'البحث'].includes(cleanBody)) return await userCommands.promptSearch(sock, msg);
-    if (['تصنيفات', 'التصنيفات'].includes(cleanBody)) return await userCommands.displayCategories(sock, msg);
-    if (['جميع', 'جميع الصوتيات', 'كل الصوتيات'].includes(cleanBody)) return await userCommands.displayAllAudios(sock, msg);
-    if (['جديد', 'أحدث الصوتيات', 'احدث الصوتيات'].includes(cleanBody)) return await userCommands.displayRecentAudios(sock, msg);
-    if (['جديد الاسبوع', 'جديد الأسبوع', 'new this week'].includes(cleanBody)) return await userCommands.displayNewThisWeek(sock, msg);
-    if (['احصائيات', 'إحصائيات المكتبة', 'احصائيات المكتبة'].includes(cleanBody)) return await userCommands.displayLibraryStats(sock, msg);
-    if (['مفضلة', 'المفضلة'].includes(cleanBody)) return await userCommands.displayFavorites(sock, msg);
-    if (['اشتراك', 'الاشتراك'].includes(cleanBody)) return await userCommands.handleSubscribe(sock, msg);
-    if (['اضافة', 'إضافة صوتية', 'اضافة صوتية'].includes(cleanBody)) return await userCommands.promptAudioUpload(sock, msg);
+    if (['بحث', 'البحث', 'ابحث', 'بحوث', 'تفتيش', 'search'].includes(cleanBody)) return await userCommands.promptSearch(sock, msg);
+    if (['تصنيفات', 'التصنيفات', 'الاقسام', 'الأقسام', 'أقسام', 'اقسام', 'الفئات'].includes(cleanBody)) return await userCommands.displayCategories(sock, msg);
+    if (['جميع', 'جميع الصوتيات', 'كل الصوتيات', 'الكل', 'الصوتيات', 'مكتبة'].includes(cleanBody)) return await userCommands.displayAllAudios(sock, msg);
+    if (['جديد', 'أحدث الصوتيات', 'احدث الصوتيات', 'احدث', 'أحدث', 'جديدة', 'الجديد'].includes(cleanBody)) return await userCommands.displayRecentAudios(sock, msg);
+    if (['جديد الاسبوع', 'جديد الأسبوع', 'new this week', 'الاسبوع'].includes(cleanBody)) return await userCommands.displayNewThisWeek(sock, msg);
+    if (['احصائيات', 'إحصائيات المكتبة', 'احصائيات المكتبة', 'احصائية', 'إحصائيات', 'الاحصائيات'].includes(cleanBody)) return await userCommands.displayLibraryStats(sock, msg);
+    if (['مفضلة', 'المفضلة', 'مفضلتي', 'مفضلات', 'fav', 'favorites'].includes(cleanBody)) return await userCommands.displayFavorites(sock, msg);
+    if (['اشتراك', 'الاشتراك', 'اشترك', 'تنبيهات', 'اشعارات', 'إشعارات'].includes(cleanBody)) return await userCommands.handleSubscribe(sock, msg);
+    if (['اضافة', 'إضافة صوتية', 'اضافة صوتية', 'رفع', 'إضافة', 'اضف'].includes(cleanBody)) return await userCommands.promptAudioUpload(sock, msg);
     if (body.startsWith('تحميل ')) return await userCommands.downloadAudio(sock, msg, body.substring(6).trim());
     if (body.startsWith('مفضلة ')) return await userCommands.addToFavorites(sock, msg, body.substring(6).trim());
     if (body.startsWith('حذف_مفضلة ')) return await userCommands.removeFromFavorites(sock, msg, body.substring(10).trim());
@@ -617,5 +645,19 @@ export async function handleMessage(sock, rawMsg) {
   } catch (err) {
     logger.error(`Error in message routing for ${phone}: ${err.stack}`);
     await sock.sendMessage(rawMsg.key.remoteJid, { text: '❌ حدث خطأ داخلي أثناء معالجة رسالتك. يرجى المحاولة لاحقاً.' }).catch(() => {});
+  }
+}
+
+/**
+ * Clean up stale entries from in-memory Maps to prevent memory leaks.
+ * Called periodically from index.js.
+ */
+export function cleanupHandlerMaps() {
+  const now = Date.now();
+  const MAX_AGE_MS = 10 * 60 * 1000; // 10 minutes
+  for (const [phone, time] of lastWarningTimes.entries()) {
+    if (now - time > MAX_AGE_MS) {
+      lastWarningTimes.delete(phone);
+    }
   }
 }
