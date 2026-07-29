@@ -19,7 +19,7 @@ export const client = {
     // Download saved session from Hugging Face before initializing (if available)
     await hfSessionSync.downloadSession(authDir);
 
-    const { state, saveCreds } = await useMultiFileAuthState(authDir);
+    let { state, saveCreds } = await useMultiFileAuthState(authDir);
 
     // ─── Session Health Check ──────────────────────────────────────────────
     const isRegistered = state?.creds?.registered === true;
@@ -28,8 +28,36 @@ export const client = {
 
     logger.info(`[SessionCheck] registered=${isRegistered}, hasAccount=${hasAccountInfo}, me=${meId || 'unknown'}`);
 
-    if (!isRegistered) {
-      logger.warn('[SessionCheck] ⚠️  Session is NOT registered. A new QR/Pairing code will be required.');
+    // ─── Auto-heal corrupted sessions ─────────────────────────────────────
+    // If session files exist but registered=false, the session is corrupted.
+    // Clear it immediately to avoid the infinite reconnect loop.
+    if (!isRegistered && hasAccountInfo) {
+      logger.warn('[SessionCheck] ⚠️  Corrupted session detected (hasAccount but NOT registered).');
+      logger.warn('[SessionCheck] 🔧 Auto-healing: clearing corrupted session files…');
+      
+      try {
+        const fsCheck = await import('fs');
+        const pathCheck = await import('path');
+        const sessionFiles = fsCheck.default.readdirSync(authDir);
+        for (const f of sessionFiles) {
+          fsCheck.default.unlinkSync(pathCheck.default.join(authDir, f));
+        }
+        logger.info(`[SessionCheck] ✅ Cleared ${sessionFiles.length} corrupted local session files.`);
+      } catch (clearErr) {
+        logger.warn(`[SessionCheck] Could not clear local session: ${clearErr.message}`);
+      }
+
+      // Also clear from HuggingFace so the corrupted session doesn't get re-downloaded
+      await hfSessionSync.clearSession();
+      logger.info('[SessionCheck] ✅ Corrupted session cleared from HuggingFace.');
+      
+      // Re-initialize auth state from scratch (empty directory)
+      const freshAuth = await useMultiFileAuthState(authDir);
+      state = freshAuth.state;
+      saveCreds = freshAuth.saveCreds;
+      logger.info('[SessionCheck] 🔄 Fresh auth state created. QR/Pairing code will be generated.');
+    } else if (!isRegistered) {
+      logger.warn('[SessionCheck] ⚠️  No session found. A new QR/Pairing code will be required.');
       logger.warn('[SessionCheck] → Open the bot URL on Render and scan the QR or use the pairing code.');
     } else {
       logger.info(`[SessionCheck] ✅ Valid session found for ${meId}. Connecting…`);
@@ -79,7 +107,32 @@ export const client = {
 
     // ─── Reconnection backoff state ────────────────────────────────────────
     let reconnectAttempt = 0;
+    let consecutive405Count = 0;
     const MAX_RECONNECT_DELAY_MS = 60000; // max 1 minute
+    const MAX_405_BEFORE_SESSION_RESET = 3; // after 3 consecutive 405s, clear session
+
+    async function clearAndRestart(reason) {
+      logger.warn(`[SessionReset] Resetting session due to: ${reason}`);
+      try {
+        const fsReset = await import('fs');
+        const pathReset = await import('path');
+        const files = fsReset.default.readdirSync(authDir);
+        for (const f of files) {
+          fsReset.default.unlinkSync(pathReset.default.join(authDir, f));
+        }
+        logger.info(`[SessionReset] Local session cleared (${files.length} files).`);
+      } catch (e) {
+        logger.warn(`[SessionReset] Could not clear local files: ${e.message}`);
+      }
+      await hfSessionSync.clearSession();
+      latestPairingCode = null;
+      latestQr = null;
+      isRequestingPairing = false;
+      consecutive405Count = 0;
+      reconnectAttempt = 0;
+      logger.info('[SessionReset] ✅ Session purged. Restarting with fresh QR in 5s…');
+      setTimeout(() => client.initialize(), 5000);
+    }
 
     function scheduleReconnect() {
       // Exponential backoff: 3s, 6s, 12s, 24s, 48s, 60s…
@@ -113,6 +166,19 @@ export const client = {
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
         logger.warn(`[Connection] Closed — statusCode=${statusCode || 'unknown'}, error="${errorMessage}", willReconnect=${shouldReconnect}`);
+
+        // ─── Detect repeated 405 failures (corrupted/expired session) ──────
+        if (statusCode === 405) {
+          consecutive405Count++;
+          logger.warn(`[Connection] 405 failure count: ${consecutive405Count}/${MAX_405_BEFORE_SESSION_RESET}`);
+          if (consecutive405Count >= MAX_405_BEFORE_SESSION_RESET) {
+            await clearAndRestart('Repeated 405 Connection Failures — session expired or corrupted');
+            return;
+          }
+        } else {
+          consecutive405Count = 0; // reset on non-405 errors
+        }
+        // ────────────────────────────────────────────────────────────────────
 
         if (shouldReconnect) {
           scheduleReconnect();
