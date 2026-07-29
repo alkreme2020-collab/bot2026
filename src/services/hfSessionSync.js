@@ -56,8 +56,7 @@ async function getSessionFileList() {
 export const hfSessionSync = {
 
   /**
-   * Download all WhatsApp session files from HF Dataset to local authDir.
-   * Called once at startup before Baileys initializes.
+   * Download the compressed WhatsApp session file from HF Dataset and extract it.
    */
   async downloadSession(authDir) {
     if (!config.hfToken || !config.hfDataset) {
@@ -66,57 +65,45 @@ export const hfSessionSync = {
     }
 
     logger.info(`[SessionSync] Checking for saved session on Hugging Face (dataset: ${config.hfDataset})...`);
-
-    // Ensure local auth directory exists BEFORE downloading
     fs.mkdirSync(authDir, { recursive: true });
     logger.info(`[SessionSync] Auth directory ready: ${authDir}`);
 
-    const files = await getSessionFileList();
+    const tarUrl = `https://huggingface.co/datasets/${config.hfDataset}/resolve/main/${SESSION_FOLDER_IN_HF}/session.tar.gz`;
+    const tarLocalPath = path.join(authDir, 'session.tar.gz');
 
-    if (files.length === 0) {
-      logger.warn('[SessionSync] ⚠️  No saved session found on HF. Bot needs a new QR/Pairing code.');
-      logger.warn(`[SessionSync] → Open https://your-bot.onrender.com and scan the QR code.`);
-      return;
-    }
-
-    logger.info(`[SessionSync] Found ${files.length} session file(s) on HF. Downloading…`);
-
-    let downloaded = 0;
-    let failed = 0;
-    for (const filePath of files) {
-      const fileName = path.basename(filePath);
-      const localPath = path.join(authDir, fileName);
-      const url = `https://huggingface.co/datasets/${config.hfDataset}/resolve/main/${filePath}`;
-      try {
-        const ok = await downloadFile(url, localPath);
-        if (ok) downloaded++;
-      } catch (err) {
-        failed++;
-        logger.error(`[SessionSync] Failed to download ${fileName}: ${err.message}`);
+    try {
+      const ok = await downloadFile(tarUrl, tarLocalPath);
+      if (!ok) {
+        logger.warn('[SessionSync] ⚠️  No saved session.tar.gz found on HF. Bot needs a new QR/Pairing code.');
+        logger.warn(`[SessionSync] → Open your Render URL and scan the QR code.`);
+        return;
       }
-    }
 
-    if (downloaded === files.length) {
-      logger.info(`[SessionSync] ✅ All ${downloaded} session files downloaded successfully.`);
-    } else {
-      logger.warn(`[SessionSync] ⚠️  Downloaded ${downloaded}/${files.length} files (${failed} failed).`);
+      logger.info(`[SessionSync] Downloaded session.tar.gz. Extracting...`);
+      const { execSync } = await import('child_process');
+      // Extract into authDir and remove the tar file
+      execSync(`tar -xzf session.tar.gz`, { cwd: authDir });
+      fs.unlinkSync(tarLocalPath);
+      
+      const filesExtracted = fs.readdirSync(authDir).length;
+      logger.info(`[SessionSync] ✅ Session extracted successfully (${filesExtracted} files).`);
+    } catch (err) {
+      logger.error(`[SessionSync] Failed to download or extract session: ${err.message}`);
     }
   },
 
   /**
-   * Upload all local session files from authDir to HF Dataset.
+   * Compress and upload all local session files from authDir to HF Dataset.
    * Debounced: will not upload more than once every 2 minutes.
    */
   async uploadSession(authDir) {
     if (!config.hfToken || !config.hfDataset) return;
     if (!fs.existsSync(authDir)) return;
 
-    // Clear any pending upload timer and schedule a new one
     if (uploadDebounceTimer) {
       clearTimeout(uploadDebounceTimer);
     }
 
-    // If last upload was recent, debounce and wait
     const now = Date.now();
     const timeSinceLast = now - lastUploadTime;
     const delay = timeSinceLast < UPLOAD_DEBOUNCE_MS
@@ -131,31 +118,36 @@ export const hfSessionSync = {
       uploadDebounceTimer = null;
       lastUploadTime = Date.now();
 
-      const files = fs.readdirSync(authDir).filter(f => {
-        try { return fs.statSync(path.join(authDir, f)).isFile(); } catch { return false; }
-      });
+      const files = fs.readdirSync(authDir).filter(f => f !== 'session.tar.gz');
       if (files.length === 0) return;
 
-      try {
-        const filesToUpload = files.map(fileName => {
-          const localPath = path.join(authDir, fileName);
-          const fileBuffer = fs.readFileSync(localPath);
-          return {
-            path: `${SESSION_FOLDER_IN_HF}/${fileName}`,
-            content: new Blob([fileBuffer])
-          };
-        });
+      const tarLocalPath = path.join(authDir, 'session.tar.gz');
 
+      try {
+        const { execSync } = await import('child_process');
+        
+        // Compress the directory contents into session.tar.gz (excluding existing tar to prevent recursion)
+        execSync(`tar -czf session.tar.gz --exclude=session.tar.gz .`, { cwd: authDir });
+        
+        const fileBuffer = fs.readFileSync(tarLocalPath);
+        
         await uploadFiles({
           repo: { type: 'dataset', name: config.hfDataset },
           accessToken: config.hfToken,
-          files: filesToUpload,
-          commitTitle: 'Update WhatsApp session'
+          files: [{
+            path: `${SESSION_FOLDER_IN_HF}/session.tar.gz`,
+            content: new Blob([fileBuffer])
+          }],
+          commitTitle: `Update WhatsApp session (${files.length} files compressed)`
         });
 
-        logger.info(`[SessionSync] ✅ Session synced to HF (${files.length} files).`);
+        // Clean up the local tarball after upload
+        fs.unlinkSync(tarLocalPath);
+
+        logger.info(`[SessionSync] ✅ Session compressed and synced to HF (${(fileBuffer.length / 1024).toFixed(1)} KB).`);
       } catch (err) {
         logger.error(`[SessionSync] Failed to upload session to HF: ${err.message}`);
+        if (fs.existsSync(tarLocalPath)) fs.unlinkSync(tarLocalPath);
       }
     }, delay);
   },
