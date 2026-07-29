@@ -12,6 +12,12 @@ export let latestQr = null;
 export let latestPairingCode = null;
 let isRequestingPairing = false;
 
+// ─── Module-level reconnection state (persists across initialize() calls) ────
+let reconnectAttempt = 0;
+let consecutive405Count = 0;
+const MAX_RECONNECT_DELAY_MS = 5 * 60 * 1000; // max 5 minutes
+const MAX_405_BEFORE_SESSION_RESET = 3;
+
 export const client = {
   initialize: async () => {
     const authDir = process.env.AUTH_DIR || '/app/.baileys_auth';
@@ -105,11 +111,7 @@ export const client = {
       }
     }
 
-    // ─── Reconnection backoff state ────────────────────────────────────────
-    let reconnectAttempt = 0;
-    let consecutive405Count = 0;
-    const MAX_RECONNECT_DELAY_MS = 60000; // max 1 minute
-    const MAX_405_BEFORE_SESSION_RESET = 3; // after 3 consecutive 405s, clear session
+    // ─── Reconnection helpers (state is module-level) ──────────────────────
 
     async function clearAndRestart(reason) {
       logger.warn(`[SessionReset] Resetting session due to: ${reason}`);
@@ -130,13 +132,13 @@ export const client = {
       isRequestingPairing = false;
       consecutive405Count = 0;
       reconnectAttempt = 0;
-      logger.info('[SessionReset] ✅ Session purged. Restarting with fresh QR in 5s…');
-      setTimeout(() => client.initialize(), 5000);
+      logger.info('[SessionReset] ✅ Session purged. Restarting with fresh QR in 30s (cooldown)…');
+      setTimeout(() => client.initialize(), 30000);
     }
 
     function scheduleReconnect() {
-      // Exponential backoff: 3s, 6s, 12s, 24s, 48s, 60s…
-      const delay = Math.min(3000 * Math.pow(2, reconnectAttempt), MAX_RECONNECT_DELAY_MS);
+      // Exponential backoff: 10s, 20s, 40s, 80s, 160s, 300s (max 5 min)
+      const delay = Math.min(10000 * Math.pow(2, reconnectAttempt), MAX_RECONNECT_DELAY_MS);
       reconnectAttempt++;
       logger.warn(`[Reconnect] Attempt #${reconnectAttempt} scheduled in ${Math.round(delay / 1000)}s…`);
       setTimeout(() => {
