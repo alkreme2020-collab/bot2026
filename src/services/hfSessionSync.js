@@ -1,11 +1,13 @@
 import fs from 'fs';
 import path from 'path';
+import { execSync } from 'child_process';
 import { uploadFiles } from '@huggingface/hub';
 import { config } from '../config/index.js';
 import logger from '../utils/logger.js';
 
 const SESSION_FOLDER_IN_HF = 'whatsapp_session';
 const DB_FILE_IN_HF = 'database.sqlite';
+const SESSION_ARCHIVE_NAME = 'session.tar.gz';
 
 // Debounce: prevent uploading more than once every 2 minutes
 let uploadDebounceTimer = null;
@@ -31,32 +33,11 @@ async function downloadFile(url, destPath) {
   return true;
 }
 
-/**
- * Get list of session files stored in HF Dataset via API.
- */
-async function getSessionFileList() {
-  try {
-    const url = `https://huggingface.co/api/datasets/${config.hfDataset}/tree/main/${SESSION_FOLDER_IN_HF}`;
-    const res = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${config.hfToken}`,
-        'Content-Type': 'application/json'
-      },
-      redirect: 'follow'
-    });
-
-    if (!res.ok) return [];
-    const files = await res.json();
-    return files.filter(f => f.type === 'file').map(f => f.path);
-  } catch {
-    return [];
-  }
-}
-
 export const hfSessionSync = {
 
   /**
-   * Download the compressed WhatsApp session file from HF Dataset and extract it.
+   * Download the compressed session archive from HF Dataset and extract it.
+   * Called once at startup before Baileys initializes.
    */
   async downloadSession(authDir) {
     if (!config.hfToken || !config.hfDataset) {
@@ -64,42 +45,50 @@ export const hfSessionSync = {
       return;
     }
 
-    logger.info(`[SessionSync] Checking for saved session on Hugging Face (dataset: ${config.hfDataset})...`);
-    fs.mkdirSync(authDir, { recursive: true });
+    logger.info(`[SessionSync] Checking for compressed session on Hugging Face (dataset: ${config.hfDataset})...`);
+
+    // Ensure local auth directory exists BEFORE downloading
+    if (!fs.existsSync(authDir)) {
+      fs.mkdirSync(authDir, { recursive: true });
+    }
     logger.info(`[SessionSync] Auth directory ready: ${authDir}`);
 
-    const tarUrl = `https://huggingface.co/datasets/${config.hfDataset}/resolve/main/${SESSION_FOLDER_IN_HF}/session.tar.gz`;
-    const tarLocalPath = path.join(authDir, 'session.tar.gz');
+    const archivePath = path.join(process.cwd(), SESSION_ARCHIVE_NAME);
+    const url = `https://huggingface.co/datasets/${config.hfDataset}/resolve/main/${SESSION_FOLDER_IN_HF}/${SESSION_ARCHIVE_NAME}`;
 
     try {
-      const ok = await downloadFile(tarUrl, tarLocalPath);
+      const ok = await downloadFile(url, archivePath);
+      
       if (!ok) {
-        logger.warn('[SessionSync] ⚠️  No saved session.tar.gz found on HF. Bot needs a new QR/Pairing code.');
-        logger.warn(`[SessionSync] → Open your Render URL and scan the QR code.`);
+        logger.warn('[SessionSync] ⚠️  No compressed session found on HF. Bot needs a new QR/Pairing code.');
         return;
       }
 
-      logger.info(`[SessionSync] Downloaded session.tar.gz. Extracting...`);
-      const { execSync } = await import('child_process');
-      // Extract into authDir and remove the tar file
-      execSync(`tar -xzf session.tar.gz`, { cwd: authDir });
-      fs.unlinkSync(tarLocalPath);
+      logger.info(`[SessionSync] ✅ Session archive downloaded. Extracting...`);
       
-      const filesExtracted = fs.readdirSync(authDir).length;
-      logger.info(`[SessionSync] ✅ Session extracted successfully (${filesExtracted} files).`);
+      // Extract the tar.gz archive directly into authDir
+      execSync(`tar -xzf ${SESSION_ARCHIVE_NAME} -C "${authDir}"`, { stdio: 'ignore' });
+      
+      // Cleanup the archive
+      if (fs.existsSync(archivePath)) {
+        fs.unlinkSync(archivePath);
+      }
+      
+      logger.info(`[SessionSync] ✅ Session extracted successfully.`);
     } catch (err) {
       logger.error(`[SessionSync] Failed to download or extract session: ${err.message}`);
     }
   },
 
   /**
-   * Compress and upload all local session files from authDir to HF Dataset.
+   * Compress local session files and upload as a single archive to HF Dataset.
    * Debounced: will not upload more than once every 2 minutes.
    */
   async uploadSession(authDir) {
     if (!config.hfToken || !config.hfDataset) return;
     if (!fs.existsSync(authDir)) return;
 
+    // Clear any pending upload timer and schedule a new one
     if (uploadDebounceTimer) {
       clearTimeout(uploadDebounceTimer);
     }
@@ -118,44 +107,41 @@ export const hfSessionSync = {
       uploadDebounceTimer = null;
       lastUploadTime = Date.now();
 
-      const files = fs.readdirSync(authDir).filter(f => f !== 'session.tar.gz');
+      const files = fs.readdirSync(authDir);
       if (files.length === 0) return;
 
-      const tarLocalPath = path.join(authDir, 'session.tar.gz');
+      const archivePath = path.join(process.cwd(), SESSION_ARCHIVE_NAME);
 
       try {
-        const { execSync } = await import('child_process');
-        
-        // Compress the directory contents into session.tar.gz (excluding existing tar to prevent recursion)
-        execSync(`tar -czf session.tar.gz --exclude=session.tar.gz .`, { cwd: authDir });
-        
-        const fileBuffer = fs.readFileSync(tarLocalPath);
+        // Compress the authDir contents into a tar.gz archive
+        execSync(`tar -czf ${SESSION_ARCHIVE_NAME} -C "${authDir}" .`, { stdio: 'ignore' });
+
+        const fileBuffer = fs.readFileSync(archivePath);
         
         await uploadFiles({
           repo: { type: 'dataset', name: config.hfDataset },
           accessToken: config.hfToken,
           files: [{
-            path: `${SESSION_FOLDER_IN_HF}/session.tar.gz`,
+            path: `${SESSION_FOLDER_IN_HF}/${SESSION_ARCHIVE_NAME}`,
             content: new Blob([fileBuffer])
           }],
-          commitTitle: `Update WhatsApp session (${files.length} files compressed)`
+          commitTitle: 'Update compressed WhatsApp session'
         });
 
-        // Clean up the local tarball after upload
-        fs.unlinkSync(tarLocalPath);
-
         logger.info(`[SessionSync] ✅ Session compressed and synced to HF (${(fileBuffer.length / 1024).toFixed(1)} KB).`);
+        
+        // Cleanup local archive
+        if (fs.existsSync(archivePath)) {
+          fs.unlinkSync(archivePath);
+        }
       } catch (err) {
-        logger.error(`[SessionSync] Failed to upload session to HF: ${err.message}`);
-        if (fs.existsSync(tarLocalPath)) fs.unlinkSync(tarLocalPath);
+        logger.error(`[SessionSync] Failed to compress/upload session: ${err.message}`);
       }
     }, delay);
   },
 
   /**
-   * Delete all WhatsApp session files from HF Dataset.
-   * Called when the bot is permanently logged out to prevent
-   * the restart loop of re-downloading an invalid session.
+   * Delete the session archive from HF Dataset.
    */
   async clearSession() {
     if (!config.hfToken || !config.hfDataset) return;
@@ -163,24 +149,15 @@ export const hfSessionSync = {
     logger.info('[SessionSync] 🗑️  Clearing invalid session from HuggingFace...');
 
     try {
-      const files = await getSessionFileList();
-      if (files.length === 0) {
-        logger.info('[SessionSync] No session files found on HF to clear.');
-        return;
-      }
-
-      // HuggingFace Hub API: delete files by uploading an empty commit with deletions
       const { deleteFiles } = await import('@huggingface/hub');
       await deleteFiles({
         repo: { type: 'dataset', name: config.hfDataset },
         accessToken: config.hfToken,
-        paths: files,
+        paths: [`${SESSION_FOLDER_IN_HF}/${SESSION_ARCHIVE_NAME}`],
         commitTitle: 'Clear invalidated WhatsApp session'
       });
-
-      logger.info(`[SessionSync] ✅ Cleared ${files.length} session file(s) from HuggingFace.`);
+      logger.info(`[SessionSync] ✅ Cleared session archive from HuggingFace.`);
     } catch (err) {
-      // deleteFiles might not be available in older versions — fallback: overwrite with empty marker
       logger.warn(`[SessionSync] deleteFiles failed (${err.message}), trying fallback overwrite...`);
       try {
         await uploadFiles({
@@ -192,7 +169,6 @@ export const hfSessionSync = {
           }],
           commitTitle: 'Mark session as cleared'
         });
-        logger.info('[SessionSync] ✅ Placed session-cleared marker on HuggingFace.');
       } catch (fallbackErr) {
         logger.error(`[SessionSync] Could not clear HF session: ${fallbackErr.message}`);
       }
@@ -201,7 +177,6 @@ export const hfSessionSync = {
 
   /**
    * Download the SQLite database file from HF Dataset to local path.
-   * Called once at startup BEFORE initDatabase so the persisted DB is used.
    */
   async downloadDatabase() {
     if (!config.hfToken || !config.hfDataset) return;
@@ -221,7 +196,6 @@ export const hfSessionSync = {
 
   /**
    * Upload the local SQLite database file to HF Dataset.
-   * Debounced: will not upload more than once every 2 minutes.
    */
   async uploadDatabase() {
     if (!config.hfToken || !config.hfDataset) return;
@@ -263,13 +237,11 @@ export const hfSessionSync = {
 
   /**
    * Force upload the database immediately, bypassing debounce.
-   * Use for critical operations like approve/delete where data loss is unacceptable.
    */
   async forceUploadDatabase() {
     if (!config.hfToken || !config.hfDataset) return;
     if (!fs.existsSync(config.dbPath)) return;
 
-    // Cancel any pending debounced upload
     if (uploadDbTimer) {
       clearTimeout(uploadDbTimer);
       uploadDbTimer = null;
