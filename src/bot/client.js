@@ -13,18 +13,32 @@ export let latestPairingCode = null;
 export let isConnected = false;
 let isRequestingPairing = false;
 
-// ─── Module-level reconnection state (persists across initialize() calls) ────
+// ─── Module-level state (persists across reconnections) ──────────────────────
 let reconnectAttempt = 0;
 let consecutive405Count = 0;
 const MAX_RECONNECT_DELAY_MS = 5 * 60 * 1000; // max 5 minutes
-const MAX_405_BEFORE_SESSION_RESET = 3;
+const MAX_405_BEFORE_LONG_WAIT = 3;
+
+// Cached auth state — created ONCE, reused for all reconnections
+let cachedAuthDir = null;
+let cachedState = null;
+let cachedSaveCreds = null;
+let isFirstBoot = true;
 
 export const client = {
+  /**
+   * First boot: download session, create auth state, connect.
+   * Called only ONCE at startup.
+   */
   initialize: async () => {
     const authDir = process.env.AUTH_DIR || '/app/.baileys_auth';
+    cachedAuthDir = authDir;
 
-    // Download saved session from Hugging Face before initializing (if available)
-    await hfSessionSync.downloadSession(authDir);
+    // Download saved session from Hugging Face (only on first boot)
+    if (isFirstBoot) {
+      await hfSessionSync.downloadSession(authDir);
+      isFirstBoot = false;
+    }
 
     let { state, saveCreds } = await useMultiFileAuthState(authDir);
 
@@ -35,13 +49,9 @@ export const client = {
 
     logger.info(`[SessionCheck] registered=${isRegistered}, hasAccount=${hasAccountInfo}, me=${meId || 'unknown'}`);
 
-    // ─── Auto-heal corrupted sessions ─────────────────────────────────────
-    // If session files exist but registered=false, the session is corrupted.
-    // Clear it immediately to avoid the infinite reconnect loop.
+    // Auto-heal corrupted sessions
     if (!isRegistered && hasAccountInfo) {
-      logger.warn('[SessionCheck] ⚠️  Corrupted session detected (hasAccount but NOT registered).');
-      logger.warn('[SessionCheck] 🔧 Auto-healing: clearing corrupted session files…');
-      
+      logger.warn('[SessionCheck] ⚠️  Corrupted session detected. Auto-healing…');
       try {
         const fsCheck = await import('fs');
         const pathCheck = await import('path');
@@ -49,27 +59,38 @@ export const client = {
         for (const f of sessionFiles) {
           fsCheck.default.unlinkSync(pathCheck.default.join(authDir, f));
         }
-        logger.info(`[SessionCheck] ✅ Cleared ${sessionFiles.length} corrupted local session files.`);
+        logger.info(`[SessionCheck] ✅ Cleared ${sessionFiles.length} corrupted session files.`);
       } catch (clearErr) {
-        logger.warn(`[SessionCheck] Could not clear local session: ${clearErr.message}`);
+        logger.warn(`[SessionCheck] Could not clear: ${clearErr.message}`);
       }
-
-      // Also clear from HuggingFace so the corrupted session doesn't get re-downloaded
       await hfSessionSync.clearSession();
-      logger.info('[SessionCheck] ✅ Corrupted session cleared from HuggingFace.');
-      
-      // Re-initialize auth state from scratch (empty directory)
       const freshAuth = await useMultiFileAuthState(authDir);
       state = freshAuth.state;
       saveCreds = freshAuth.saveCreds;
-      logger.info('[SessionCheck] 🔄 Fresh auth state created. QR/Pairing code will be generated.');
+      logger.info('[SessionCheck] 🔄 Fresh auth state created.');
     } else if (!isRegistered) {
-      logger.warn('[SessionCheck] ⚠️  No session found. A new QR/Pairing code will be required.');
-      logger.warn('[SessionCheck] → Open the bot URL on Render and scan the QR or use the pairing code.');
+      logger.warn('[SessionCheck] ⚠️  No session. QR/Pairing code will be generated.');
     } else {
-      logger.info(`[SessionCheck] ✅ Valid session found for ${meId}. Connecting…`);
+      logger.info(`[SessionCheck] ✅ Valid session for ${meId}. Connecting…`);
     }
-    // ──────────────────────────────────────────────────────────────────────
+
+    // Cache the auth state for reconnections
+    cachedState = state;
+    cachedSaveCreds = saveCreds;
+
+    // Start the actual connection
+    await client._connect();
+  },
+
+  /**
+   * Internal: Create socket and connect using cached auth state.
+   * This is called for BOTH initial connection and reconnections.
+   * It does NOT re-download session or re-create auth state.
+   */
+  _connect: async () => {
+    const authDir = cachedAuthDir;
+    const state = cachedState;
+    const saveCreds = cachedSaveCreds;
 
     const sock = makeWASocket({
       auth: state,
@@ -77,7 +98,8 @@ export const client = {
       syncFullHistory: false,
       markOnlineOnConnect: true,
       keepAliveIntervalMs: 15000,
-      browser: ['Ubuntu', 'Chrome', '110.0.5481.77'],
+      browser: ['Mac OS', 'Safari', '17.5'],
+      retryRequestDelayMs: 2000,
       getMessage: async (key) => {
         if (key && key.id) {
           const msg = msgStore.get(key.id);
@@ -112,30 +134,7 @@ export const client = {
       }
     }
 
-    // ─── Reconnection helpers (state is module-level) ──────────────────────
-
-    async function clearAndRestart(reason) {
-      logger.warn(`[SessionReset] Resetting session due to: ${reason}`);
-      try {
-        const fsReset = await import('fs');
-        const pathReset = await import('path');
-        const files = fsReset.default.readdirSync(authDir);
-        for (const f of files) {
-          fsReset.default.unlinkSync(pathReset.default.join(authDir, f));
-        }
-        logger.info(`[SessionReset] Local session cleared (${files.length} files).`);
-      } catch (e) {
-        logger.warn(`[SessionReset] Could not clear local files: ${e.message}`);
-      }
-      await hfSessionSync.clearSession();
-      latestPairingCode = null;
-      latestQr = null;
-      isRequestingPairing = false;
-      consecutive405Count = 0;
-      reconnectAttempt = 0;
-      logger.info('[SessionReset] ✅ Session purged. Restarting with fresh QR in 30s (cooldown)…');
-      setTimeout(() => client.initialize(), 30000);
-    }
+    // ─── Reconnection helpers ──────────────────────────────────────────────
 
     function scheduleReconnect() {
       // Exponential backoff: 10s, 20s, 40s, 80s, 160s, 300s (max 5 min)
@@ -143,7 +142,9 @@ export const client = {
       reconnectAttempt++;
       logger.warn(`[Reconnect] Attempt #${reconnectAttempt} scheduled in ${Math.round(delay / 1000)}s…`);
       setTimeout(() => {
-        client.initialize();
+        // IMPORTANT: use _connect(), NOT initialize()
+        // This reuses the same auth state instead of creating new credentials
+        client._connect();
       }, delay);
     }
     // ──────────────────────────────────────────────────────────────────────
@@ -171,36 +172,39 @@ export const client = {
 
         logger.warn(`[Connection] Closed — statusCode=${statusCode || 'unknown'}, error="${errorMessage}", willReconnect=${shouldReconnect}`);
 
-        // ─── Detect repeated 405 failures (corrupted/expired session) ──────
+        // ─── Detect repeated 405 failures ──────────────────────────────────
         if (statusCode === 405) {
           consecutive405Count++;
-          logger.warn(`[Connection] 405 failure count: ${consecutive405Count}/${MAX_405_BEFORE_SESSION_RESET}`);
-          if (consecutive405Count >= MAX_405_BEFORE_SESSION_RESET) {
-            await clearAndRestart('Repeated 405 Connection Failures — session expired or corrupted');
+          logger.warn(`[Connection] 405 failure count: ${consecutive405Count}/${MAX_405_BEFORE_LONG_WAIT}`);
+          
+          if (consecutive405Count >= MAX_405_BEFORE_LONG_WAIT) {
+            // Don't clear session or restart — just wait much longer
+            const longWait = 5 * 60 * 1000; // 5 minutes
+            logger.warn(`[Connection] ⏳ Too many 405s. Waiting ${longWait / 60000} minutes before next attempt…`);
+            consecutive405Count = 0;
+            reconnectAttempt = 0;
+            setTimeout(() => client._connect(), longWait);
             return;
           }
         } else {
-          consecutive405Count = 0; // reset on non-405 errors
+          consecutive405Count = 0;
         }
         // ────────────────────────────────────────────────────────────────────
 
         if (shouldReconnect) {
           scheduleReconnect();
         } else {
-          logger.error('[Connection] ❌ Logged out permanently. Clearing session to allow fresh login…');
+          logger.error('[Connection] ❌ Logged out permanently. Clearing session…');
+          logger.warn('[Connection] ❌ Bot logged out. Socket is closed.');
 
-          // Note: Cannot send admin logout alert here — socket is already disconnected.
-          logger.warn('[Connection] ❌ Bot logged out. Socket is closed, cannot notify admin via WhatsApp.');
-
-          // ─── Clear invalid session from HuggingFace FIRST ───────────────
-          // This prevents the restart loop: invalid HF session → download → reject → loop
+          // Clear invalid session from HuggingFace
           await hfSessionSync.clearSession();
-          // ────────────────────────────────────────────────────────────────
 
           latestPairingCode = null;
           latestQr = null;
           isRequestingPairing = false;
-          // Clear the stale local session so the next boot forces a new QR
+          
+          // Clear local session files
           try {
             const fs = await import('fs');
             const path = await import('path');
@@ -208,14 +212,17 @@ export const client = {
             for (const f of files) {
               fs.default.unlinkSync(path.default.join(authDir, f));
             }
-            logger.info('[Connection] Local session files cleared. Restarting…');
+            logger.info('[Connection] Local session files cleared.');
           } catch (e) {
             logger.warn(`[Connection] Could not clear session files: ${e.message}`);
           }
-          setTimeout(() => client.initialize(), 3000);
+          
+          // Full re-initialize (need new auth state after logout)
+          isFirstBoot = true;
+          setTimeout(() => client.initialize(), 5000);
         }
       } else if (connection === 'open') {
-        // Reset backoff on successful connection
+        // Reset everything on successful connection
         reconnectAttempt = 0;
         consecutive405Count = 0;
         isConnected = true;
@@ -270,7 +277,6 @@ export const client = {
               logger.info(`Stored message in msgStore. ID: ${msg.key.id}, Keys: ${Object.keys(msg.message).join(', ')}`);
               // Maintain max size 300 in msgStore to avoid memory growth
               if (msgStore.size > 300) {
-                // Delete oldest 50 entries in batch to reduce frequent deletions
                 const keysToDelete = [];
                 for (const k of msgStore.keys()) {
                   keysToDelete.push(k);
