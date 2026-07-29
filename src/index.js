@@ -2,7 +2,7 @@ import express from 'express';
 import QRCode from 'qrcode';
 import { initDatabase, closeDatabase } from './database/connection.js';
 import { cacheService } from './services/cacheService.js';
-import { client, latestQr, latestPairingCode } from './bot/client.js';
+import { client, latestQr, latestPairingCode, isConnected } from './bot/client.js';
 import { hfSessionSync } from './services/hfSessionSync.js';
 import { sessionService } from './services/sessionService.js';
 import { dbService } from './services/dbService.js';
@@ -20,14 +20,14 @@ app.get('/health', (req, res) => {
 // Clean Web QR Code & Pairing Code Endpoint
 app.get(['/', '/qr', '/code', '/pair'], async (req, res) => {
   try {
-    if (!latestQr && !latestPairingCode) {
+    // Case 1: Bot is fully connected
+    if (isConnected && !latestQr && !latestPairingCode) {
       return res.send(`
         <!DOCTYPE html>
         <html lang="ar" dir="rtl">
           <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <meta http-equiv="refresh" content="5">
             <title>حالة بوت الواتساب</title>
             <style>
               body { display: flex; justify-content: center; align-items: center; min-height: 100vh; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #111b21; color: white; margin: 0; }
@@ -40,6 +40,36 @@ app.get(['/', '/qr', '/code', '/pair'], async (req, res) => {
             <div class="card">
               <h2>✅ البوت متصل ومفعل بنجاح!</h2>
               <p>البوت يعمل الآن ومستعد لاستقبال الرسائل.<br>إذا انقطع الاتصال، سيظهر رمز QR وكود الربط هنا تلقائياً.</p>
+            </div>
+          </body>
+        </html>
+      `);
+    }
+
+    // Case 2: Not connected and no QR yet — bot is trying to connect
+    if (!latestQr && !latestPairingCode) {
+      return res.send(`
+        <!DOCTYPE html>
+        <html lang="ar" dir="rtl">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <meta http-equiv="refresh" content="10">
+            <title>جاري الاتصال...</title>
+            <style>
+              body { display: flex; justify-content: center; align-items: center; min-height: 100vh; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #111b21; color: white; margin: 0; }
+              .card { text-align: center; background: #202c33; padding: 40px; border-radius: 16px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); max-width: 420px; width: 90%; }
+              h2 { color: #e6a817; margin-bottom: 12px; }
+              p { color: #8696a0; font-size: 15px; }
+              .spinner { border: 4px solid #2a3942; border-top: 4px solid #e6a817; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 15px auto; }
+              @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+            </style>
+          </head>
+          <body>
+            <div class="card">
+              <div class="spinner"></div>
+              <h2>⏳ جاري الاتصال بسيرفرات واتساب...</h2>
+              <p>البوت يحاول الاتصال. سيظهر رمز QR أو كود الربط هنا تلقائياً عند نجاح الاتصال بالسيرفر.<br><br>يتم تحديث الصفحة تلقائياً كل 10 ثوانٍ.</p>
             </div>
           </body>
         </html>

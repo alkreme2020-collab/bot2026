@@ -10,6 +10,7 @@ export const msgStore = new Map();
 
 export let latestQr = null;
 export let latestPairingCode = null;
+export let isConnected = false;
 let isRequestingPairing = false;
 
 // ─── Module-level reconnection state (persists across initialize() calls) ────
@@ -163,6 +164,7 @@ export const client = {
       }
 
       if (connection === 'close') {
+        isConnected = false;
         const statusCode = (lastDisconnect?.error)?.output?.statusCode;
         const errorMessage = lastDisconnect?.error?.message || 'unknown';
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
@@ -215,6 +217,8 @@ export const client = {
       } else if (connection === 'open') {
         // Reset backoff on successful connection
         reconnectAttempt = 0;
+        consecutive405Count = 0;
+        isConnected = true;
         latestQr = null;
         latestPairingCode = null;
         isRequestingPairing = false;
