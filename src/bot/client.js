@@ -1,4 +1,4 @@
-import { makeWASocket, useMultiFileAuthState, DisconnectReason, getAggregateVotesInPollMessage } from '@whiskeysockets/baileys';
+import { makeWASocket, useMultiFileAuthState, DisconnectReason, getAggregateVotesInPollMessage, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import { handleMessage } from './handlers.js';
@@ -92,7 +92,12 @@ export const client = {
     const state = cachedState;
     const saveCreds = cachedSaveCreds;
 
+    // Fetch the latest WhatsApp Web version to prevent 405 Connection Failure
+    const { version, isLatest } = await fetchLatestBaileysVersion();
+    logger.info(`[Connection] Using WA v${version.join('.')}, isLatest: ${isLatest}`);
+
     const sock = makeWASocket({
+      version,
       auth: state,
       logger: pino({ level: 'silent' }),
       syncFullHistory: false,
