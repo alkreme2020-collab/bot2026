@@ -31,7 +31,9 @@ export const client = {
    * Called only ONCE at startup.
    */
   initialize: async () => {
-    const authDir = process.env.AUTH_DIR || '/app/.baileys_auth';
+    const fs = await import('fs');
+    const path = await import('path');
+    const authDir = process.env.AUTH_DIR || path.default.join(process.cwd(), '.baileys_auth');
     cachedAuthDir = authDir;
 
     // Download saved session from Hugging Face (only on first boot)

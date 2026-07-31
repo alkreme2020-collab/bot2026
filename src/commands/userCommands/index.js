@@ -622,7 +622,7 @@ ${contentType === 'book' ? `✍️ *المؤلف:* ${item.author || 'غير مح
 
   async handleAddMediaTypeSelection(client, msg, body) {
     const text = (body || '').trim();
-    if (text.includes('صوتية') || text.includes('🎧')) {
+    if (text.includes('صوتية') || text.includes('صوتيات') || text.includes('🎧')) {
       sessionService.setSession(msg.from, 'AWAITING_UPLOAD_FILE', { contentType: 'audio' });
       await msg.reply('📤 أرسل الملف الصوتي الآن (MP3, M4A, WAV, etc.):\n\n💡 اكتب *إلغاء* للرجوع.');
       return;

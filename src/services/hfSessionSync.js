@@ -50,7 +50,11 @@ export const hfSessionSync = {
     // Ensure local auth directory exists BEFORE downloading
     if (!fs.existsSync(authDir)) {
       fs.mkdirSync(authDir, { recursive: true });
+    } else if (fs.readdirSync(authDir).length > 0) {
+      logger.info('[SessionSync] Local session files already exist. Skipping download from HF to prevent overwriting valid session.');
+      return;
     }
+
     logger.info(`[SessionSync] Auth directory ready: ${authDir}`);
 
     const archivePath = path.join(process.cwd(), SESSION_ARCHIVE_NAME);
