@@ -11,7 +11,12 @@ import { recentPollSent } from '../../services/pollTracker.js';
 import logger, { dbLog } from '../../utils/logger.js';
 import { phoneToJid } from '../../utils/jidHelper.js';
 import { msgStore } from '../../bot/client.js';
-import { SUPPORTED_AUDIO_MIMETYPES, SUPPORTED_EXTENSIONS, EXTENSION_TO_MIMETYPE, VIDEO_EXTENSION_TO_MIMETYPE, MAIN_MENU_OPTIONS } from '../../constants/audio.js';
+import { 
+  SUPPORTED_AUDIO_MIMETYPES, SUPPORTED_EXTENSIONS, EXTENSION_TO_MIMETYPE, 
+  SUPPORTED_VIDEO_MIMETYPES, SUPPORTED_VIDEO_EXTENSIONS, VIDEO_EXTENSION_TO_MIMETYPE,
+  SUPPORTED_BOOK_MIMETYPES, SUPPORTED_BOOK_EXTENSIONS, BOOK_EXTENSION_TO_MIMETYPE,
+  MAIN_MENU_OPTIONS, CONTENT_TYPES 
+} from '../../constants/audio.js';
 
 /**
  * Format bytes into human-readable string in Arabic
@@ -27,37 +32,46 @@ export function formatBytes(bytes) {
 }
 
 /**
- * Format duration in seconds to mm:ss or hh:mm:ss string
- * @param {number} seconds
- * @returns {string}
+ * Helper to build navigation poll options based on state
  */
+export function buildNavPoll(options = {}) {
+  const values = [];
+
+  if (options.currentPage && options.totalPages) {
+    if (options.currentPage > 1) values.push('⬅️ السابق');
+    if (options.currentPage < options.totalPages) values.push('➡️ التالي');
+  }
+
+  if (options.hasDownloadMore) values.push('📥 تحميل رقم آخر');
+  if (options.hasSearch) values.push('🔍 بحث جديد');
+  if (options.hasAddMore) values.push('➕ إضافة محتوى آخر');
+
+  if (options.extraOptions && Array.isArray(options.extraOptions)) {
+    values.push(...options.extraOptions);
+  }
+
+  if (options.hasBack) values.push(options.backLabel || '↩️ رجوع');
+  values.push('🔙 القائمة الرئيسية');
+
+  return values;
+}
 
 export const userCommands = {
   /**
-   * Handle /start and show main welcome menu
-   * @param {object} client
-   * @param {object} msg
-   * @param {boolean} [skipTextReply=false]
+   * Main welcome menu (12 options)
    */
   async handleStart(client, msg) {
     try {
+      const pollText = `🎙️ منصة إعلام شبوة السلفي 🤖\nمكتبة علمية شاملة للصوتيات والفيديوهات والكتب.`;
       const sentMsg = await client.sendMessage(msg.remoteJid, {
         poll: {
-          name: `🎙️ *مكتبة الصوتيات العربية* 🤖 منصة إعلام شبوة السلفي
-  
-📋 *القائمة الرئيسية:*
-🔍 بحث | 📂 تصنيفات | 📋 جميع | 🆕 جديد | ⭐ مفضلة | 🔔 اشتراك | 📤 اضافة | 📊 احصائيات
-  
-اختر الخدمة المطلوبة من الأسفل:`,
+          name: pollText,
           values: MAIN_MENU_OPTIONS,
           selectableCount: 1
         }
       });
-      if (sentMsg?.key?.id) {
-        logger.info(`Sending start poll. Msg ID: ${sentMsg.key.id}, hasMessage: ${!!sentMsg.message}`);
-        if (sentMsg.message) {
-          msgStore.set(sentMsg.key.id, sentMsg.message);
-        }
+      if (sentMsg?.key?.id && sentMsg.message) {
+        msgStore.set(sentMsg.key.id, sentMsg.message);
       }
       recentPollSent.record(msg.from, MAIN_MENU_OPTIONS);
     } catch (err) {
@@ -66,703 +80,381 @@ export const userCommands = {
   },
 
   /**
-   * Start or guide search process
-   * @param {object} client
-   * @param {object} msg
+   * Prompt user to select Content Type (audio/video/book) for Search or Browse or Add
    */
-  async promptSearch(client, msg) {
-    sessionService.setSession(msg.from, 'AWAITING_SEARCH');
-    await msg.reply('🔍 من فضلك أرسل اسم الصوتية، اسم المقدم، أو جزء من العنوان للبحث:');
+  async promptContentType(client, msg, context = 'search') {
+    const titles = {
+      search: '🔍 اختر نوع المحتوى للبحث:',
+      browse: '📂 اختر نوع المحتوى للتصفح:',
+      add: '➕ اختر نوع المحتوى للإضافة:'
+    };
+
+    const pollValues = ['🎧 صوتيات', '🎬 فيديوهات', '📚 كتب', '🔙 القائمة الرئيسية'];
+    
+    sessionService.setSession(msg.from, 'SELECTING_CONTENT_TYPE', { context });
+
+    try {
+      const sentMsg = await client.sendMessage(msg.remoteJid, {
+        poll: {
+          name: titles[context] || titles.search,
+          values: pollValues,
+          selectableCount: 1
+        }
+      });
+      if (sentMsg?.key?.id && sentMsg.message) {
+        msgStore.set(sentMsg.key.id, sentMsg.message);
+      }
+      recentPollSent.record(msg.from, pollValues);
+    } catch (err) {
+      logger.warn(`Could not send content type poll: ${err.message}`);
+    }
   },
 
   /**
-   * Execute search and reply with matches
-   * @param {object} client
-   * @param {object} msg
-   * @param {string} query
+   * Display Categories for a specific content type
    */
-  async executeSearch(client, msg, query) {
+  async displayCategoriesForType(client, msg, contentType, context = 'browse') {
     client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
-    const results = searchService.search(query);
-    const limit = Math.min(results.length, 6); // limit results
     
-    // Store results in session so user can download by typing 'تحميل' or a number
-    sessionService.setSession(msg.from, 'SEARCH_RESULTS', { 
-      lastAudios: results.slice(0, limit) 
+    const categories = await dbService.getCategoriesByType(contentType);
+    const typeObj = CONTENT_TYPES[contentType] || CONTENT_TYPES.audio;
+
+    const values = categories.map(c => `📋 ${c.name}`);
+    if (context === 'search') {
+      values.push(`🔍 بحث في كل ${typeObj.label}`);
+    }
+    values.push('↩️ رجوع');
+    values.push('🔙 القائمة الرئيسية');
+
+    sessionService.setSession(msg.from, 'SELECTING_CATEGORY', {
+      contentType,
+      context,
+      backTo: 'SELECTING_CONTENT_TYPE'
+    });
+
+    try {
+      const sentMsg = await client.sendMessage(msg.remoteJid, {
+        poll: {
+          name: `📂 تصنيفات ${typeObj.label} (${typeObj.emoji}):`,
+          values,
+          selectableCount: 1
+        }
+      });
+      if (sentMsg?.key?.id && sentMsg.message) {
+        msgStore.set(sentMsg.key.id, sentMsg.message);
+      }
+      recentPollSent.record(msg.from, values);
+    } catch (err) {
+      logger.warn(`Could not send categories poll: ${err.message}`);
+    }
+  },
+
+  /**
+   * Prompt user to type search keyword
+   */
+  async promptSearchInput(client, msg, contentType, categoryName = null) {
+    const typeObj = CONTENT_TYPES[contentType] || CONTENT_TYPES.audio;
+    
+    sessionService.setSession(msg.from, 'AWAITING_SEARCH', {
+      contentType,
+      categoryName,
+      backTo: categoryName ? 'SELECTING_CATEGORY' : 'SELECTING_CONTENT_TYPE'
+    });
+
+    const text = categoryName
+      ? `🔍 اكتب كلمة البحث في تصنيف *(${categoryName})*:\n\n💡 اكتب *إلغاء* للرجوع`
+      : `🔍 اكتب كلمة البحث في كل *${typeObj.label}*:\n\n💡 اكتب *إلغاء* للرجوع`;
+
+    await msg.reply(text);
+  },
+
+  /**
+   * Execute search and display results
+   */
+  async executeSearch(client, msg, query, contentType = 'audio', categoryName = null) {
+    client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
+    
+    let results = searchService.search(query, contentType);
+    if (categoryName) {
+      results = results.filter(item => item.category === categoryName);
+    }
+
+    const typeObj = CONTENT_TYPES[contentType] || CONTENT_TYPES.audio;
+    const limit = Math.min(results.length, 6);
+    const pageItems = results.slice(0, limit);
+
+    sessionService.setSession(msg.from, 'CONTENT_LIST', {
+      contentType,
+      lastItems: pageItems,
+      backTo: 'AWAITING_SEARCH',
+      query
     });
 
     if (results.length === 0) {
-      await msg.reply('😔 عذراً، لم نجد أي صوتيات تطابق بحثك. حاول استخدام كلمات مفتاحية أخرى أو تحقق من الإملاء.');
+      await msg.reply(`😔 عذراً، لم نجد أي ${typeObj.label} تطابق "${query}".`);
+      
+      const pollValues = buildNavPoll({ hasSearch: true, hasBack: true, backLabel: '↩️ رجوع' });
+      const sentMsg = await client.sendMessage(msg.remoteJid, {
+        poll: { name: '📌 اختر خطوتك القادمة:', values: pollValues, selectableCount: 1 }
+      });
+      if (sentMsg?.key?.id && sentMsg.message) msgStore.set(sentMsg.key.id, sentMsg.message);
       return;
     }
 
-    let response = `🔎 *نتائج البحث عن (${query}):* \n\n`;
-    
-    for (let i = 0; i < limit; i++) {
-      const audio = results[i];
-      response += `🎙️ *[${i + 1}]* *${audio.title}*\n`;
-      response += `👤 *المقدم:* ${audio.presenter}\n`;
-      response += `📂 *التصنيف:* ${audio.category}\n`;
-      if (audio.location) response += `📍 *المكان:* ${audio.location}\n`;
-      if (audio.date_hijri) response += `📅 *التاريخ:* ${audio.date_hijri}\n`;
-      response += `💾 *الحجم:* ${formatBytes(audio.size)}\n`;
-      response += `🔽 للتحميل أرسل رقم الصوتية (مثلاً: \`${i + 1}\` أو \`تحميل ${i + 1}\`)\n\n`;
+    let response = `🔍 *نتائج البحث عن (${query}) في ${typeObj.label}:*\n━━━━━━━━━━━━━━━━━━\n\n`;
+
+    for (let i = 0; i < pageItems.length; i++) {
+      const item = pageItems[i];
+      response += `*[${i + 1}]* ${typeObj.emoji} *${item.title}*\n`;
+      if (contentType === 'book') {
+        response += `✍️ *المؤلف:* ${item.author || 'غير محدد'}\n`;
+      } else {
+        response += `👤 *المقدم:* ${item.presenter || 'غير محدد'}\n`;
+      }
+      response += `📂 *التصنيف:* ${item.category}\n`;
+      response += `💾 *الحجم:* ${formatBytes(item.size)}\n\n`;
     }
 
-    if (results.length > limit) {
-      response += `⚠️ تم عرض أول ${limit} نتائج فقط من أصل ${results.length}. يرجى تحديد البحث أكثر لنتائج أدق.`;
-    }
-
+    response += `━━━━━━━━━━━━━━━━━━\n📥 أرسل رقم المحتوى لتحميله (1-${pageItems.length})`;
     await msg.reply(response);
+
+    const pollValues = buildNavPoll({ hasSearch: true, hasBack: true });
+    try {
+      const sentMsg = await client.sendMessage(msg.remoteJid, {
+        poll: { name: '📌 التنقل بين الخيارات:', values: pollValues, selectableCount: 1 }
+      });
+      if (sentMsg?.key?.id && sentMsg.message) msgStore.set(sentMsg.key.id, sentMsg.message);
+    } catch (e) {}
   },
 
   /**
-   * Display audio categories list
-   * @param {object} client
-   * @param {object} msg
-   * @param {boolean} [skipTextReply=false]
+   * Display all items of a content type (or category) with pagination
    */
-  async displayCategories(client, msg) {
+  async listContent(client, msg, contentType = 'audio', categoryName = null, page = 0) {
     client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
-    sessionService.setSession(msg.from, 'AWAITING_CATEGORY_BROWSE');
-
-    const categoriesList = config.categories.map((cat, idx) => `${idx + 1}️⃣ ${cat}`).join('\n');
-
-    try {
-      const sentMsg = await client.sendMessage(msg.remoteJid, {
-        poll: {
-          name: `📂 *تصنيفات الصوتيات المتوفرة:*\n\n${categoriesList}\n\nاختر التصنيف المطلوب:`,
-          values: config.categories.map((cat, idx) => `${idx + 1}. ${cat}`),
-          selectableCount: 1
-        }
-      });
-      if (sentMsg?.key?.id && sentMsg.message) {
-        msgStore.set(sentMsg.key.id, sentMsg.message);
-      }
-      recentPollSent.record(msg.from, config.categories.map((cat, idx) => `${idx + 1}. ${cat}`));
-    } catch (err) {
-      logger.warn(`Could not send category poll: ${err.message}`);
-    }
-  },
-
-  /**
-   * Browse audios in selected category
-   * @param {object} client
-   * @param {object} msg
-   * @param {string} text
-   */
-  /**
-   * Send a navigation poll for category pagination
-   * @param {object} client
-   * @param {object} msg
-   * @param {string} category
-   * @param {number} page
-   * @param {number} totalPages
-   */
-  async _sendCategoryPoll(client, msg, category, page, totalPages) {
-    const pollValues = [];
-    if (page > 0) pollValues.push('⬅️ السابق');
-    if (page < totalPages - 1) pollValues.push('➡️ التالي');
-    pollValues.push('🔙 القائمة الرئيسية');
-
-    try {
-      const sentMsg = await client.sendMessage(msg.remoteJid, {
-        poll: {
-          name: `📂 ${category} — صفحة ${page + 1}/${totalPages}`,
-          values: pollValues,
-          selectableCount: 1
-        }
-      });
-      if (sentMsg?.key?.id && sentMsg.message) {
-        msgStore.set(sentMsg.key.id, sentMsg.message);
-      }
-      recentPollSent.record(msg.from, pollValues);
-    } catch (err) {
-      logger.warn(`Could not send category poll: ${err.message}`);
-    }
-  },
-
-  /**
-   * Browse audios in selected category with pagination (10 per page) + navigation poll
-   * @param {object} client
-   * @param {object} msg
-   * @param {string} text
-   */
-  async browseCategory(client, msg, text) {
-    const session = sessionService.getSession(msg.from);
-    const cleanText = text.trim();
-    const { page, allAudios, pageSize, totalPages } = (session.data || {});
-
-    // Back to main menu
-    if (cleanText === 'قائمة' || cleanText === '🔙 القائمة الرئيسية') {
-      sessionService.clearSession(msg.from);
-      return await this.handleStart(client, msg);
-    }
-
-    // Check for navigation if we have session data
-    if (allAudios && page !== undefined && pageSize && totalPages) {
-      // Download by number
-      const num = parseInt(cleanText, 10);
-      if (!isNaN(num) && num > 0 && num <= pageSize) {
-        const idx = page * pageSize + (num - 1);
-        if (idx < allAudios.length) {
-          return await this.downloadAudio(client, msg, allAudios[idx].uuid);
-        }
-      }
-      if (cleanText.startsWith('تحميل ')) {
-        const n = parseInt(cleanText.split(' ')[1], 10);
-        if (!isNaN(n) && n > 0 && n <= pageSize) {
-          const idx = page * pageSize + (n - 1);
-          if (idx < allAudios.length) {
-            return await this.downloadAudio(client, msg, allAudios[idx].uuid);
-          }
-        }
-      }
-
-      // Next page
-      if ((cleanText === 'التالي' || cleanText === '➡️ التالي') && page < totalPages - 1) {
-        const newPage = page + 1;
-        const pageAudios = allAudios.slice(newPage * pageSize, (newPage + 1) * pageSize);
-        sessionService.setSession(msg.from, 'AWAITING_CATEGORY_BROWSE', {
-          allAudios, page: newPage, pageSize, totalPages, lastAudios: pageAudios
-        });
-        const response = this._formatCategoryAudios(pageAudios, newPage, totalPages, session.data.categoryName);
-        await msg.reply(response);
-        await this._sendCategoryPoll(client, msg, session.data.categoryName, newPage, totalPages);
-        return;
-      }
-
-      // Previous page
-      if ((cleanText === 'السابق' || cleanText === '⬅️ السابق') && page > 0) {
-        const newPage = page - 1;
-        const pageAudios = allAudios.slice(newPage * pageSize, (newPage + 1) * pageSize);
-        sessionService.setSession(msg.from, 'AWAITING_CATEGORY_BROWSE', {
-          allAudios, page: newPage, pageSize, totalPages, lastAudios: pageAudios
-        });
-        const response = this._formatCategoryAudios(pageAudios, newPage, totalPages, session.data.categoryName);
-        await msg.reply(response);
-        await this._sendCategoryPoll(client, msg, session.data.categoryName, newPage, totalPages);
-        return;
-      }
-    }
-
-    // Try to match as category first (from poll selection like "1. خطب" or "خطب")
-    let catText = cleanText;
-    if (/^\d+\.\s*/.test(catText)) {
-      catText = catText.replace(/^\d+\.\s*/, '').trim();
-    }
-
-    const catIndex = parseInt(catText, 10) - 1;
-    let category = '';
-
-    if (!isNaN(catIndex) && catIndex >= 0 && catIndex < config.categories.length) {
-      category = config.categories[catIndex];
+    
+    let allItems = [];
+    if (contentType === 'video') {
+      allItems = cacheService.getVideos();
+    } else if (contentType === 'book') {
+      allItems = cacheService.getBooks();
     } else {
-      const match = config.categories.find(c => c === catText);
-      if (match) category = match;
+      allItems = cacheService.getAudios();
     }
 
-    if (category) {
-      const audios = cacheService.getAudios().filter(a => a.category === category);
-      if (audios.length === 0) {
-        await msg.reply(`📂 تصنيف *(${category})* لا يحتوي على صوتيات حالياً.`);
-        return;
-      }
-
-      const pSize = 10;
-      const pg = 0;
-      const tPages = Math.ceil(audios.length / pSize);
-      const pageAudios = audios.slice(0, pSize);
-
-      sessionService.setSession(msg.from, 'AWAITING_CATEGORY_BROWSE', {
-        allAudios: audios,
-        page: pg,
-        pageSize: pSize,
-        totalPages: tPages,
-        categoryName: category,
-        lastAudios: pageAudios
-      });
-
-      const response = this._formatCategoryAudios(pageAudios, pg, tPages, category);
-      await msg.reply(response);
-      await this._sendCategoryPoll(client, msg, category, pg, tPages);
-      return;
+    if (categoryName) {
+      allItems = allItems.filter(item => item.category === categoryName);
     }
 
-    // Not a category — try as download number (backward compat)
-    if (session.data && session.data.lastAudios) {
-      const num = parseInt(cleanText, 10);
-      if (!isNaN(num) && num > 0 && num <= session.data.lastAudios.length) {
-        return await this.downloadAudio(client, msg, session.data.lastAudios[num - 1].uuid);
-      }
-      if (cleanText.startsWith('تحميل ')) {
-        const n = parseInt(cleanText.split(' ')[1], 10);
-        if (!isNaN(n) && n > 0 && n <= session.data.lastAudios.length) {
-          return await this.downloadAudio(client, msg, session.data.lastAudios[n - 1].uuid);
-        }
-      }
-    }
+    const typeObj = CONTENT_TYPES[contentType] || CONTENT_TYPES.audio;
 
-    await msg.reply('❌ اختيار غير صحيح. استخدم الاستطلاع للتنقل أو أرسل رقم الصوتية للتحميل.');
-  },
-
-  /**
-   * Format category audio page listing
-   * @param {Array} pageAudios
-   * @param {number} page
-   * @param {number} totalPages
-   * @param {string} category
-   * @returns {string}
-   */
-  _formatCategoryAudios(pageAudios, page, totalPages, category) {
-    let response = `📂 *${category} — الصفحة ${page + 1}/${totalPages}:* \n\n`;
-    for (let i = 0; i < pageAudios.length; i++) {
-      const audio = pageAudios[i];
-      response += `🎙️ *[${i + 1}]* *${audio.title}* - ${audio.presenter}\n`;
-      if (audio.location) response += `📍 *المكان:* ${audio.location}\n`;
-      if (audio.date_hijri) response += `📅 *التاريخ:* ${audio.date_hijri}\n`;
-      response += `💾 ${formatBytes(audio.size)}\n\n`;
-    }
-    response += `🔢 أرسل رقم الصوتية للتحميل (1-${pageAudios.length})`;
-    return response;
-  },
-
-  /**
-   * Send a navigation poll for browse-all pagination
-   * @param {object} client
-   * @param {object} msg
-   * @param {number} page
-   * @param {number} totalPages
-   */
-  async _sendBrowseAllPoll(client, msg, page, totalPages) {
-    const pollValues = [];
-    if (page > 0) pollValues.push('⬅️ السابق');
-    if (page < totalPages - 1) pollValues.push('➡️ التالي');
-    pollValues.push('🔙 القائمة الرئيسية');
-
-    try {
+    if (allItems.length === 0) {
+      await msg.reply(`📭 لا يوجد محتوى في ${typeObj.label} ${categoryName ? `تصنيف (${categoryName})` : ''} حالياً.`);
+      const pollValues = buildNavPoll({ hasAddMore: true, hasBack: true, backLabel: '↩️ رجوع للتصنيفات' });
       const sentMsg = await client.sendMessage(msg.remoteJid, {
-        poll: {
-          name: `📋 صفحة ${page + 1}/${totalPages} — اختر من الخيارات:`,
-          values: pollValues,
-          selectableCount: 1
-        }
+        poll: { name: '📌 اختر إجراءً:', values: pollValues, selectableCount: 1 }
       });
-      if (sentMsg?.key?.id && sentMsg.message) {
-        msgStore.set(sentMsg.key.id, sentMsg.message);
-      }
-      recentPollSent.record(msg.from, pollValues);
-    } catch (err) {
-      logger.warn(`Could not send browse-all poll: ${err.message}`);
-    }
-  },
-
-  /**
-   * Build the formatted audio listing text for a page
-   * @param {Array} pageAudios
-   * @param {number} page
-   * @param {number} totalPages
-   * @returns {string}
-   */
-  _formatPageAudios(pageAudios, page, totalPages) {
-    let response = `📋 *جميع الصوتيات - الصفحة ${page + 1}/${totalPages}:* \n\n`;
-    for (let i = 0; i < pageAudios.length; i++) {
-      const audio = pageAudios[i];
-      response += `🎙️ *[${i + 1}]* *${audio.title}* - ${audio.presenter}\n`;
-      if (audio.location) response += `📍 *المكان:* ${audio.location}\n`;
-      if (audio.date_hijri) response += `📅 *التاريخ:* ${audio.date_hijri}\n`;
-      response += `💾 ${formatBytes(audio.size)}\n\n`;
-    }
-    response += `🔢 أرسل رقم الصوتية للتحميل (1-${pageAudios.length})`;
-    return response;
-  },
-
-  /**
-   * Display all audios with pagination (10 per page)
-   * @param {object} client
-   * @param {object} msg
-   */
-  async displayAllAudios(client, msg) {
-    client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
-    const allAudios = cacheService.getAudios();
-    if (allAudios.length === 0) {
-      await msg.reply('📭 المكتبة لا تحتوي على صوتيات بعد.');
+      if (sentMsg?.key?.id && sentMsg.message) msgStore.set(sentMsg.key.id, sentMsg.message);
       return;
     }
 
     const pageSize = 10;
-    const page = 0;
-    const totalPages = Math.ceil(allAudios.length / pageSize);
-    const pageAudios = allAudios.slice(0, pageSize);
+    const totalPages = Math.ceil(allItems.length / pageSize);
+    const currentPage = Math.max(0, Math.min(page, totalPages - 1));
+    const pageItems = allItems.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
 
-    sessionService.setSession(msg.from, 'BROWSE_ALL', {
-      allAudios,
-      page,
+    sessionService.setSession(msg.from, 'CONTENT_LIST', {
+      contentType,
+      categoryName,
+      page: currentPage,
       pageSize,
       totalPages,
-      lastAudios: pageAudios
+      allItems,
+      lastItems: pageItems,
+      backTo: categoryName ? 'SELECTING_CATEGORY' : 'SELECTING_CONTENT_TYPE'
     });
 
-    const response = this._formatPageAudios(pageAudios, page, totalPages);
+    let header = categoryName
+      ? `📂 *${categoryName} — ${typeObj.label} (صفحة ${currentPage + 1} من ${totalPages}):*`
+      : `${typeObj.emoji} *جميع ${typeObj.label} (صفحة ${currentPage + 1} من ${totalPages}):*`;
+
+    let response = `${header}\n━━━━━━━━━━━━━━━━━━\n\n`;
+
+    for (let i = 0; i < pageItems.length; i++) {
+      const item = pageItems[i];
+      response += `*[${i + 1}]* ${typeObj.emoji} *${item.title}*\n`;
+      if (contentType === 'book') {
+        response += `✍️ *المؤلف:* ${item.author || 'غير محدد'}\n`;
+      } else {
+        response += `👤 *المقدم:* ${item.presenter || 'غير محدد'}\n`;
+      }
+      response += `💾 ${formatBytes(item.size)}\n\n`;
+    }
+
+    response += `━━━━━━━━━━━━━━━━━━\n📥 أرسل رقم المحتوى لتحميله (1-${pageItems.length})`;
     await msg.reply(response);
-    await this._sendBrowseAllPoll(client, msg, page, totalPages);
+
+    const pollValues = buildNavPoll({
+      currentPage: currentPage + 1,
+      totalPages,
+      hasBack: true,
+      backLabel: categoryName ? '↩️ رجوع للتصنيفات' : '↩️ رجوع'
+    });
+
+    try {
+      const sentMsg = await client.sendMessage(msg.remoteJid, {
+        poll: { name: `📋 صفحة ${currentPage + 1}/${totalPages} — اختر الإجراء:`, values: pollValues, selectableCount: 1 }
+      });
+      if (sentMsg?.key?.id && sentMsg.message) msgStore.set(sentMsg.key.id, sentMsg.message);
+    } catch (e) {}
   },
 
   /**
-   * Handle pagination and download for browse-all mode (poll + text input)
-   * @param {object} client
-   * @param {object} msg
-   * @param {string} text
+   * Handle pagination and selection within content listing
    */
-  async handleBrowseAll(client, msg, text) {
+  async handleContentListInput(client, msg, text) {
     const session = sessionService.getSession(msg.from);
-    const { allAudios, page, pageSize, totalPages } = session.data;
-    const lastAudios = session.data.lastAudios || [];
-
+    const { contentType, categoryName, page, totalPages, lastItems } = (session.data || {});
     const cleanText = text.trim();
 
-    // Check if input is a download number referring to current page
+    // Check for numerical selection
     const num = parseInt(cleanText, 10);
-    if (!isNaN(num) && num > 0 && num <= lastAudios.length) {
-      return await this.downloadAudio(client, msg, lastAudios[num - 1].uuid);
+    if (!isNaN(num) && num > 0 && lastItems && num <= lastItems.length) {
+      const selectedItem = lastItems[num - 1];
+      return await this.downloadContent(client, msg, selectedItem.uuid, contentType);
     }
+
+    // Check for 'تحميل X'
     if (cleanText.startsWith('تحميل ')) {
-      const parts = cleanText.split(' ');
-      if (parts.length >= 2) {
-        const n = parseInt(parts[1], 10);
-        if (!isNaN(n) && n > 0 && n <= lastAudios.length) {
-          return await this.downloadAudio(client, msg, lastAudios[n - 1].uuid);
-        }
+      const n = parseInt(cleanText.split(' ')[1], 10);
+      if (!isNaN(n) && n > 0 && lastItems && n <= lastItems.length) {
+        const selectedItem = lastItems[n - 1];
+        return await this.downloadContent(client, msg, selectedItem.uuid, contentType);
       }
     }
 
-    // Back to main menu
-    if (cleanText === 'قائمة' || cleanText === '🔙 القائمة الرئيسية') {
-      sessionService.clearSession(msg.from);
-      return await this.handleStart(client, msg);
-    }
-
-    // Next page
-    if (cleanText === 'التالي' || cleanText === '➡️ التالي') {
-      if (page >= totalPages - 1) {
-        await msg.reply('هذه آخر صفحة ✅');
-        return;
+    // Navigation buttons
+    if (cleanText === '➡️ التالي') {
+      if (page < totalPages - 1) {
+        return await this.listContent(client, msg, contentType, categoryName, page + 1);
       }
-      const newPage = page + 1;
-      const pageAudios = allAudios.slice(newPage * pageSize, (newPage + 1) * pageSize);
-
-      sessionService.setSession(msg.from, 'BROWSE_ALL', {
-        allAudios,
-        page: newPage,
-        pageSize,
-        totalPages,
-        lastAudios: pageAudios
-      });
-
-      const response = this._formatPageAudios(pageAudios, newPage, totalPages);
-      await msg.reply(response);
-      await this._sendBrowseAllPoll(client, msg, newPage, totalPages);
+      await msg.reply('هذه آخر صفحة ✅');
       return;
     }
 
-    // Previous page
-    if (cleanText === 'السابق' || cleanText === '⬅️ السابق') {
-      if (page <= 0) {
-        await msg.reply('هذه أول صفحة ✅');
-        return;
+    if (cleanText === '⬅️ السابق') {
+      if (page > 0) {
+        return await this.listContent(client, msg, contentType, categoryName, page - 1);
       }
-      const newPage = page - 1;
-      const pageAudios = allAudios.slice(newPage * pageSize, (newPage + 1) * pageSize);
-
-      sessionService.setSession(msg.from, 'BROWSE_ALL', {
-        allAudios,
-        page: newPage,
-        pageSize,
-        totalPages,
-        lastAudios: pageAudios
-      });
-
-      const response = this._formatPageAudios(pageAudios, newPage, totalPages);
-      await msg.reply(response);
-      await this._sendBrowseAllPoll(client, msg, newPage, totalPages);
+      await msg.reply('هذه أول صفحة ✅');
       return;
     }
 
-    // Invalid input
-    await msg.reply('❌ إدخال غير صحيح. استخدم الاستطلاع للتنقل بين الصفحات، أو أرسل رقم الصوتية للتحميل.');
-  },
+    if (cleanText === '🔍 بحث جديد') {
+      return await this.promptContentType(client, msg, 'search');
+    }
 
-  /**
-   * Show recent audios
-   * @param {object} client
-   * @param {object} msg
-   */
-  async displayRecentAudios(client, msg) {
-    client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
-    const audios = cacheService.getAudios().slice(0, 5); // top 5 recent
-
-    if (audios.length === 0) {
-      await msg.reply('📭 المكتبة لا تحتوي على صوتيات بعد.');
+    if (cleanText === '📥 تحميل رقم آخر') {
+      await msg.reply('📥 أرسل رقم المحتوى المطلوب لتحميله.');
       return;
     }
 
-    // Store results in session so user can download by typing 'تحميل' or a number
-    sessionService.setSession(msg.from, 'SEARCH_RESULTS', { 
-      lastAudios: audios
-    });
-
-    let response = `🆕 *أحدث الصوتيات المضافة للمكتبة:* \n\n`;
-    audios.forEach((audio, idx) => {
-      response += `*[${idx + 1}]* *${audio.title}*\n`;
-      response += `👤 *المقدم:* ${audio.presenter} | 📂 *التصنيف:* ${audio.category}\n`;
-      if (audio.location) response += `📍 *المكان:* ${audio.location}\n`;
-      if (audio.date_hijri) response += `📅 *التاريخ:* ${audio.date_hijri}\n`;
-      response += `🔽 للتحميل أرسل رقم الصوتية (مثلاً: \`${idx + 1}\` أو \`تحميل ${idx + 1}\`)\n\n`;
-    });
-
-    await msg.reply(response);
+    await msg.reply('❌ إدخال غير صحيح. أرسل رقم المحتوى لتحميله أو اختر من الاستطلاع.');
   },
 
   /**
-   * Display audios added in the last 7 days.
-   * @param {object} client
-   * @param {object} msg
+   * Show Weekly Content (audio, video, or book)
    */
-  async displayNewThisWeek(client, msg) {
+  async displayNewThisWeek(client, msg, contentType = 'audio') {
     client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
+    const typeObj = CONTENT_TYPES[contentType] || CONTENT_TYPES.audio;
+
     try {
-      const audios = await dbService.getAudiosThisWeek();
-      if (audios.length === 0) {
-        await msg.reply('📭 لا توجد صوتيات جديدة هذا الأسبوع.');
-        return;
-      }
-      sessionService.setSession(msg.from, 'SEARCH_RESULTS', {
-        lastAudios: audios
-      });
-      let response = `🆕 *جديد هذا الأسبوع (${audios.length}):*\n\n`;
-      for (let i = 0; i < audios.length; i++) {
-        const a = audios[i];
-        response += `🎙️ *[${i + 1}]* *${a.title}* - ${a.presenter}\n`;
-        response += `📂 التصنيف: ${a.category}\n`;
-        if (a.location) response += `📍 ${a.location}\n`;
-        response += '\n';
-      }
-      response += `🔽 أرسل رقم الصوتية للتحميل`;
-      await msg.reply(response);
-    } catch (err) {
-      logger.error(`Error displaying new this week: ${err.message}`);
-      await msg.reply('❌ حدث خطأ أثناء جلب الصوتيات الجديدة.');
-    }
-  },
-
-  /**
-   * Display library public stats
-   * @param {object} client
-   * @param {object} msg
-   */
-  async displayLibraryStats(client, msg) {
-    try {
-      const stats = await dbService.getSummaryStats();
-      const response = `📊 *إحصائيات مكتبة الصوتيات:*
-
-🎙️ إجمالي عدد الصوتيات: *${stats.totalAudios}*
-👥 المشتركون بالبوت: *${stats.totalUsers}*
-📥 إجمالي عمليات التحميل: *${stats.totalDownloads}*
-⏱️ طلبات الإضافة المعلقة: *${stats.totalRequests}*
-
-شكراً لمساهمتكم في نشر المعرفة! ❤️`;
-      await msg.reply(response);
-    } catch (err) {
-      logger.error(`Error displaying stats: ${err.message}`);
-      await msg.reply('❌ حدث خطأ أثناء جلب الإحصائيات. يرجى المحاولة لاحقاً.');
-    }
-  },
-
-  /**
-   * Manage and display user favorites
-   * @param {object} client
-   * @param {object} msg
-   */
-  async displayFavorites(client, msg) {
-    client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
-    try {
-      const favs = await dbService.getUserFavorites(msg.from);
-      if (favs.length === 0) {
-        await msg.reply('⭐ قائمتك المفضلة فارغة حالياً.\n\nيمكنك إضافة أي صوتية للمفضلة عن طريق إرسال: `مفضلة رقم_الصوتية_uuid`');
-        return;
-      }
-
-      // Store results in session so user can download by typing 'تحميل' or a number
-      sessionService.setSession(msg.from, 'SEARCH_RESULTS', { 
-        lastAudios: favs
-      });
-
-      let response = `⭐ *صوتياتك المفضلة:* \n\n`;
-      favs.forEach((audio, idx) => {
-        response += `*[${idx + 1}]* *${audio.title}*\n`;
-        response += `👤 *المقدم:* ${audio.presenter}\n`;
-        if (audio.location) response += `📍 *المكان:* ${audio.location}\n`;
-        if (audio.date_hijri) response += `📅 *التاريخ:* ${audio.date_hijri}\n`;
-        response += `🔽 للتحميل: \`${idx + 1}\` أو \`تحميل ${idx + 1}\`\n`;
-        response += `❌ للإزالة: \`حذف_مفضلة ${audio.uuid}\`\n\n`;
-      });
-
-      await msg.reply(response);
-    } catch (err) {
-      logger.error(`Error showing favorites: ${err.message}`);
-      await msg.reply('❌ فشل تحميل قائمتك المفضلة.');
-    }
-  },
-
-  /**
-   * Toggle subscription for notifications
-   * @param {object} client
-   * @param {object} msg
-   */
-  async handleSubscribe(client, msg) {
-    try {
-      const nowSubscribed = await dbService.toggleSubscribe(msg.from);
-      if (nowSubscribed) {
-        await msg.reply(`✅ تم الاشتراك في الإشعارات بنجاح! 🔔
-
-سنرسل لك إشعاراً فور إضافة أي صوتية جديدة إلى المكتبة.
-
-لإلغاء الاشتراك، اختر "🔔 الاشتراك" مرة أخرى.`);
+      let items = [];
+      if (contentType === 'video') {
+        items = await dbService.getVideosThisWeek();
+      } else if (contentType === 'book') {
+        items = await dbService.getBooksThisWeek();
       } else {
-        await msg.reply(`✅ تم إلغاء الاشتراك في الإشعارات.
-
-يمكنك الاشتراك مرة أخرى في أي وقت من خلال القائمة الرئيسية.`);
+        items = await dbService.getAudiosThisWeek();
       }
-      await dbLog('SUBSCRIBE_TOGGLE', `${nowSubscribed ? 'Subscribed' : 'Unsubscribed'}: ${msg.from}`);
-    } catch (err) {
-      logger.error(`Error toggling subscription: ${err.message}`);
-      await msg.reply('❌ حدث خطأ أثناء تعديل حالة الاشتراك.');
-    }
-  },
 
-  /**
-   * Notify all subscribers about a new audio. Sends in batches with delays to avoid bans.
-   * @param {object} client
-   * @param {object} audio
-   */
-  async notifySubscribers(client, audio) {
-    try {
-      const subscribers = await dbService.getAllSubscribers();
-      if (subscribers.length === 0) return;
-
-      const mediaType = audio.media_type || 'audio';
-      const typeLabel = mediaType === 'video' ? 'فيديو' : 'صوتية';
-      const emoji = mediaType === 'video' ? '🎬' : '🎙️';
-
-      logger.info(`Notifying ${subscribers.length} subscribers about new ${typeLabel}: ${audio.title}`);
-      const caption = `🔔 *${typeLabel} جديدة مضافة للمكتبة!*
-      
-${emoji} *${audio.title}*
-👤 *المقدم:* ${audio.presenter}
-📂 *التصنيف:* ${audio.category}
-${audio.location ? `📍 *المكان:* ${audio.location}\n` : ''}${audio.date_hijri ? `📅 *التاريخ:* ${audio.date_hijri}\n` : ''}💾 ${formatBytes(audio.size)}
-
-يمكنك تحميلها الآن من خلال البوت بالبحث عن العنوان.`;
-
-      let sent = 0;
-      for (const phone of subscribers) {
-        try {
-          await client.sendMessage(phoneToJid(phone), { text: caption });
-          sent++;
-          await new Promise(r => setTimeout(r, 2500));
-        } catch (err) {
-          logger.warn(`Failed to notify subscriber ${phone}: ${err.message}`);
-        }
-      }
-      logger.info(`Subscribers notified: ${sent}/${subscribers.length}`);
-    } catch (err) {
-      logger.error(`Error notifying subscribers: ${err.message}`);
-    }
-  },
-
-  /**
-   * Add an audio to user's favorites
-   * @param {object} client
-   * @param {object} msg
-   * @param {string} uuid
-   */
-  async addToFavorites(client, msg, uuid) {
-    try {
-      const audio = await dbService.getAudioByUuid(uuid);
-      if (!audio) {
-        await msg.reply('❌ عذراً، لم نجد الصوتية المطلوبة.');
+      if (items.length === 0) {
+        await msg.reply(`📭 لا تتوفر ${typeObj.label} جديدة هذا الأسبوع.`);
+        const pollValues = buildNavPoll({ 
+          extraOptions: [`${typeObj.emoji} جميع ${typeObj.label}`],
+          hasBack: true 
+        });
+        const sentMsg = await client.sendMessage(msg.remoteJid, {
+          poll: { name: '📌 المقترحات المتاحة:', values: pollValues, selectableCount: 1 }
+        });
+        if (sentMsg?.key?.id && sentMsg.message) msgStore.set(sentMsg.key.id, sentMsg.message);
         return;
       }
 
-      await dbService.addFavorite(msg.from, uuid);
-      await msg.reply(`⭐ تمت إضافة صوتية *(${audio.title})* بنجاح إلى مفضلتك!`);
-      await dbLog('FAVORITE_ADD', `User ${msg.from} added audio ${uuid} to favorites`);
+      sessionService.setSession(msg.from, 'CONTENT_LIST', {
+        contentType,
+        lastItems: items,
+        backTo: 'SELECTING_CONTENT_TYPE'
+      });
+
+      let response = `🆕 *جديد هذا الأسبوع في ${typeObj.label} (${items.length}):*\n━━━━━━━━━━━━━━━━━━\n\n`;
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        response += `*[${i + 1}]* ${typeObj.emoji} *${item.title}*\n`;
+        response += `📂 التصنيف: ${item.category}\n\n`;
+      }
+
+      response += `━━━━━━━━━━━━━━━━━━\n📥 أرسل رقم المحتوى لتحميله (1-${items.length})`;
+      await msg.reply(response);
+
+      const pollValues = buildNavPoll({ hasBack: true });
+      const sentMsg = await client.sendMessage(msg.remoteJid, {
+        poll: { name: '📌 خيارات التنقل:', values: pollValues, selectableCount: 1 }
+      });
+      if (sentMsg?.key?.id && sentMsg.message) msgStore.set(sentMsg.key.id, sentMsg.message);
+
     } catch (err) {
-      logger.error(`Error adding favorite: ${err.message}`);
-      await msg.reply('❌ فشل إضافة الصوتية للمفضلة.');
+      logger.error(`Error displaying weekly content: ${err.message}`);
+      await msg.reply('❌ حدث خطأ أثناء جلب المحتوى الأسبوعي.');
     }
   },
 
   /**
-   * Remove an audio from user's favorites
-   * @param {object} client
-   * @param {object} msg
-   * @param {string} uuid
+   * Download content file (Audio, Video, Book) and send to user
    */
-  async removeFromFavorites(client, msg, uuid) {
+  async downloadContent(client, msg, uuid, contentType = 'audio') {
     try {
-      await dbService.removeFavorite(msg.from, uuid);
-      await msg.reply(`⭐ تم إزالة الصوتية من قائمة المفضلة.`);
-    } catch (err) {
-      logger.error(`Error removing favorite: ${err.message}`);
-      await msg.reply('❌ فشل إزالة الصوتية من المفضلة.');
-    }
-  },
-
-  /**
-   * Download audio file from HuggingFace resolve URL and send to user
-   * @param {object} client
-   * @param {object} msg
-   * @param {string} uuid
-   */
-  async downloadAudio(client, msg, uuid) {
-    try {
+      const typeObj = CONTENT_TYPES[contentType] || CONTENT_TYPES.audio;
       client.sendPresenceUpdate('recording', msg.remoteJid).catch(() => {});
-      
-      // Save to session so we can add it to favorites later if requested
-      const session = sessionService.getSession(msg.from);
-      sessionService.setSession(msg.from, session.state, { lastDownloadedUuid: uuid });
 
-      const audio = await dbService.getAudioByUuid(uuid);
-      if (!audio) {
-        await msg.reply('❌ عذراً، لم نجد هذه الصوتية في نظامنا.');
+      let item = null;
+      if (contentType === 'book') {
+        item = await dbService.getBookByUuid(uuid);
+      } else {
+        item = await dbService.getAudioByUuid(uuid);
+      }
+
+      if (!item) {
+        await msg.reply(`❌ عذراً، لم نجد هذا العنصر في النظام.`);
         return;
       }
 
-      const mediaType = audio.media_type || 'audio';
-      const typeLabel = mediaType === 'video' ? 'فيديو' : 'صوتية';
-      const emoji = mediaType === 'video' ? '🎬' : '🎙️';
+      await msg.reply(`⏳ جاري تحميل ${typeObj.label} *"${item.title}"* وإرسالها لك...`);
 
-      await msg.reply(`⏳ جاري تحميل ${typeLabel} *"${audio.title}"* وإرسالها لك، يرجى الانتظار...`);
-
-      // Determine file extension from hf_url or default to mp3
-      const urlPath = audio.hf_url.split('?')[0];
-      const ext = path.extname(urlPath) || '.mp3';
+      const urlPath = item.hf_url.split('?')[0];
+      const ext = path.extname(urlPath) || (contentType === 'book' ? '.pdf' : contentType === 'video' ? '.mp4' : '.mp3');
       
-      // Download file to local temp
       const tempFilename = `download_${uuidv4()}${ext}`;
       const tempPath = path.join(config.rootDir, 'temp', tempFilename);
-      
-      // Add 60-second timeout to prevent hanging on slow/dead HF servers
+
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 60000);
-      
+      const timeoutId = setTimeout(() => controller.abort(), 90000);
+
       let response;
       try {
-        response = await fetch(audio.hf_url, {
-          headers: {
-            'Authorization': `Bearer ${config.hfToken}`
-          },
+        response = await fetch(item.hf_url, {
+          headers: config.hfToken ? { Authorization: `Bearer ${config.hfToken}` } : {},
           signal: controller.signal
         });
       } finally {
@@ -773,32 +465,30 @@ ${audio.location ? `📍 *المكان:* ${audio.location}\n` : ''}${audio.date_
         throw new Error(`HF server returned HTTP status ${response.status}`);
       }
 
-      // Write to temp file
       const arrayBuffer = await response.arrayBuffer();
       const buffer = Buffer.from(arrayBuffer);
       fs.writeFileSync(tempPath, buffer);
 
-      const cleanTitle = audio.title.replace(/[\\/:*?"<>|]/g, '') || 'audio';
-
+      const cleanTitle = item.title.replace(/[\\/:*?"<>|]/g, '') || 'file';
       const extLower = ext.toLowerCase();
-      const mimetype = mediaType === 'video'
-        ? (VIDEO_EXTENSION_TO_MIMETYPE[extLower] || 'video/mp4')
-        : (EXTENSION_TO_MIMETYPE[extLower] || 'audio/mpeg');
 
-      const caption = `${emoji} *${typeLabel}تك جاهزة للتحميل:*
-        
-- *العنوان:* ${audio.title}
-- *المقدم:* ${audio.presenter}
-- *التصنيف:* ${audio.category}
-${audio.location ? `- *المكان:* ${audio.location}\n` : ''}${audio.date_hijri ? `- *التاريخ:* ${audio.date_hijri}\n` : ''}- *الحجم:* ${formatBytes(audio.size)}
-`;
+      let mimetype = 'application/octet-stream';
+      if (contentType === 'book') {
+        mimetype = BOOK_EXTENSION_TO_MIMETYPE[extLower] || 'application/pdf';
+      } else if (contentType === 'video') {
+        mimetype = VIDEO_EXTENSION_TO_MIMETYPE[extLower] || 'video/mp4';
+      } else {
+        mimetype = EXTENSION_TO_MIMETYPE[extLower] || 'audio/mpeg';
+      }
 
-      if (mediaType === 'video') {
-        await client.sendMessage(msg.remoteJid, {
-          video: buffer,
-          mimetype,
-          caption
-        }, { quoted: msg.raw });
+      const caption = `✅ *تم إرسال الملف!*
+      
+${typeObj.emoji} *العنوان:* ${item.title}
+${contentType === 'book' ? `✍️ *المؤلف:* ${item.author || 'غير محدد'}\n` : `👤 *المقدم:* ${item.presenter || 'غير محدد'}\n`}📂 *التصنيف:* ${item.category}
+💾 *الحجم:* ${formatBytes(item.size)}`;
+
+      if (contentType === 'video') {
+        await client.sendMessage(msg.remoteJid, { video: buffer, mimetype, caption }, { quoted: msg.raw });
       } else {
         await client.sendMessage(msg.remoteJid, {
           document: buffer,
@@ -808,465 +498,280 @@ ${audio.location ? `- *المكان:* ${audio.location}\n` : ''}${audio.date_hij
         }, { quoted: msg.raw });
       }
 
-      // Send Contextual Poll
-      try {
-        const sentPoll = await client.sendMessage(msg.remoteJid, {
-          poll: {
-            name: '✨ إجراء سريع:',
-            values: ['⭐ إضافة للمفضلة', '🔍 إجراء بحث جديد', '🔙 العودة للقائمة الرئيسية'],
-            selectableCount: 1
-          }
-        });
-        if (sentPoll?.key?.id && sentPoll.message) {
-          msgStore.set(sentPoll.key.id, sentPoll.message);
-        }
-      } catch (err) {
-        logger.warn(`Could not send contextual poll: ${err.message}`);
-      }
-
       // Cleanup
       if (fs.existsSync(tempPath)) {
         fs.unlinkSync(tempPath);
       }
 
-      // Record download stats
-      await dbService.recordDownload(msg.from, uuid);
-      await dbLog('DOWNLOAD', `User ${msg.from} downloaded audio: ${audio.title} (UUID: ${uuid})`);
+      // Record Download
+      await dbService.recordDownload(msg.from, uuid, contentType);
+      await dbLog('DOWNLOAD', `User ${msg.from} downloaded ${contentType}: ${item.title}`);
+
+      // Follow-up Poll
+      const followPollValues = buildNavPoll({ hasDownloadMore: true, hasSearch: true });
+      try {
+        const sentPoll = await client.sendMessage(msg.remoteJid, {
+          poll: { name: '✅ ماذا تريد أن تفعل الآن؟', values: followPollValues, selectableCount: 1 }
+        });
+        if (sentPoll?.key?.id && sentPoll.message) msgStore.set(sentPoll.key.id, sentPoll.message);
+      } catch (err) {}
+
     } catch (err) {
-      logger.error(`Error downloading audio ${uuid}: ${err.message}`);
-      await msg.reply('❌ عذراً، حدث خطأ أثناء محاولة جلب الملف من التخزين السحابي. يرجى التواصل مع الإدارة.');
+      logger.error(`Error downloading content ${uuid}: ${err.message}`);
+      await msg.reply('❌ عذراً، حدث خطأ أثناء جلب الملف. يرجى المحاولة لاحقاً.');
     }
   },
 
   /**
-   * Prompt user to upload an audio file
-   * @param {object} client
-   * @param {object} msg
+   * Display About Bot Info
    */
-  async promptAudioUpload(client, msg) {
+  async displayAbout(client, msg) {
+    const text = `ℹ️ *نبذة عن منصة إعلام شبوة السلفي:*
+━━━━━━━━━━━━━━━━━━
+
+🤖 منصة رقمية سلفية شاملة تهدف إلى نشر العلم الشرعي المأصول للمكتبة السلفية بشبوة.
+
+📦 *المحتوى المتاح:*
+🎧 *صوتيات:* خطب، محاضرات، ودورات علمية.
+🎬 *فيديوهات:* مقتطفات ومواد مفرغة.
+📚 *كتب:* مؤلفات ورسائل علمية.
+
+نسأل الله أن ينفع بها الجميع. ❤️`;
+
+    await msg.reply(text);
+
+    const pollValues = buildNavPoll({});
+    try {
+      const sentMsg = await client.sendMessage(msg.remoteJid, {
+        poll: { name: '📌 القائمة الرئيسية:', values: pollValues, selectableCount: 1 }
+      });
+      if (sentMsg?.key?.id && sentMsg.message) msgStore.set(sentMsg.key.id, sentMsg.message);
+    } catch (e) {}
+  },
+
+  /**
+   * Display Library Stats for Audio, Video, Books
+   */
+  async displayLibraryStats(client, msg) {
+    try {
+      const stats = await dbService.getSummaryStats();
+      const text = `📊 *إحصائيات المنصة الشاملة:*
+━━━━━━━━━━━━━━━━━━
+
+🎧 الصوتيات: *${stats.totalAudios}*
+🎬 الفيديوهات: *${stats.totalVideos}*
+📚 الكتب والمؤلفات: *${stats.totalBooks}*
+
+👥 عدد المستفيدين: *${stats.totalUsers}*
+⬇️ إجمالي التحميلات: *${stats.totalDownloads}*
+⏳ الطلبات المعلقة: *${stats.totalRequests}*
+
+شكراً لمساهمتكم في نشر الخير! ❤️`;
+
+      await msg.reply(text);
+
+      const pollValues = buildNavPoll({});
+      const sentMsg = await client.sendMessage(msg.remoteJid, {
+        poll: { name: '📌 الخيارات المتاحة:', values: pollValues, selectableCount: 1 }
+      });
+      if (sentMsg?.key?.id && sentMsg.message) msgStore.set(sentMsg.key.id, sentMsg.message);
+
+    } catch (err) {
+      logger.error(`Error displaying stats: ${err.message}`);
+      await msg.reply('❌ حدث خطأ أثناء جلب الإحصائيات.');
+    }
+  },
+
+  /**
+   * Toggle Subscription for Notifications
+   */
+  async handleSubscribe(client, msg) {
+    try {
+      const nowSubscribed = await dbService.toggleSubscribe(msg.from);
+      if (nowSubscribed) {
+        await msg.reply(`✅ تم الاشتراك في الإشعارات بنجاح! 🔔\n\nستصلك إشعارات فور إضافة أي صوتيات أو فيديوهات أو كتب جديدة.`);
+      } else {
+        await msg.reply(`✅ تم إلغاء الاشتراك في الإشعارات.\n\nيمكنك إعادة الاشتراك في أي وقت.`);
+      }
+      await dbLog('SUBSCRIBE_TOGGLE', `${nowSubscribed ? 'Subscribed' : 'Unsubscribed'}: ${msg.from}`);
+
+      const pollValues = buildNavPoll({});
+      const sentMsg = await client.sendMessage(msg.remoteJid, {
+        poll: { name: '📌 العودة:', values: pollValues, selectableCount: 1 }
+      });
+      if (sentMsg?.key?.id && sentMsg.message) msgStore.set(sentMsg.key.id, sentMsg.message);
+    } catch (err) {
+      logger.error(`Error toggling subscription: ${err.message}`);
+      await msg.reply('❌ حدث خطأ أثناء تعديل حالة الاشتراك.');
+    }
+  },
+
+  /**
+   * User Content Upload Wizard (Select type -> File -> Title -> Author/Presenter -> Category -> Desc -> Confirm)
+   */
+  async promptAddContent(client, msg) {
     const cooldown = await sessionService.checkRequestCooldown(msg.from);
     if (cooldown.isCooldown) {
       const minutes = Math.ceil(cooldown.remainingMs / 60000);
-      await msg.reply(`⚠️ عذراً، لقد قمت بإرسال طلب مؤخراً. يرجى الانتظار *${minutes} دقيقة* قبل تقديم طلب آخر.`);
+      await msg.reply(`⚠️ عذراً، يرجى الانتظار *${minutes} دقيقة* قبل إرسال طلب جديد.`);
       return;
     }
 
-    sessionService.setSession(msg.from, 'AWAITING_MEDIA_TYPE');
-    try {
-      const sentMsg = await client.sendMessage(msg.remoteJid, {
-        poll: {
-          name: '📤 اختر نوع المحتوى الذي تريد رفعه:',
-          values: ['🎙️ صوتية', '🎬 فيديو', '❌ إلغاء'],
-          selectableCount: 1
-        }
-      });
-      if (sentMsg?.key?.id && sentMsg.message) {
-        msgStore.set(sentMsg.key.id, sentMsg.message);
-      }
-      recentPollSent.record(msg.from, ['🎙️ صوتية', '🎬 فيديو', '❌ إلغاء']);
-    } catch (err) {
-      logger.warn(`Could not send media type poll: ${err.message}`);
-      await msg.reply('📤 اختر نوع المحتوى: أرسل "صوتية" أو "فيديو" أو "إلغاء".');
-    }
+    return await this.promptContentType(client, msg, 'add');
   },
 
-  async handleMediaTypeSelection(client, msg, body) {
+  async handleAddMediaTypeSelection(client, msg, body) {
     const text = (body || '').trim();
-    if (text.includes('صوتية') || text.includes('🎙️') || text === 'صوت') {
-      sessionService.setSession(msg.from, 'AWAITING_AUDIO_UPLOAD');
-      await msg.reply(`📤 أرسل الملف الصوتي الآن.
-
-✅ *الصيغ المدعومة:* MP3, M4A, AAC, OGG, WAV, FLAC
-
-💡 أرسل الملف كـ "مستند" للحصول على أفضل جودة.`);
+    if (text.includes('صوتية') || text.includes('🎧')) {
+      sessionService.setSession(msg.from, 'AWAITING_UPLOAD_FILE', { contentType: 'audio' });
+      await msg.reply('📤 أرسل الملف الصوتي الآن (MP3, M4A, WAV, etc.):\n\n💡 اكتب *إلغاء* للرجوع.');
       return;
     }
-    if (text.includes('فيديو') || text.includes('🎬') || text === 'video') {
-      sessionService.setSession(msg.from, 'AWAITING_VIDEO_UPLOAD');
-      await msg.reply(`📤 أرسل ملف الفيديو الآن.
-
-✅ *الصيغ المدعومة:* MP4, MKV, WEBM, AVI, MOV
-
-💡 أرسل الملف كـ "مستند".`);
+    if (text.includes('فيديو') || text.includes('🎬')) {
+      sessionService.setSession(msg.from, 'AWAITING_UPLOAD_FILE', { contentType: 'video' });
+      await msg.reply('📤 أرسل ملف الفيديو الآن (MP4, MKV, WEBM, etc.):\n\n💡 اكتب *إلغاء* للرجوع.');
       return;
     }
-    if (text.includes('إلغاء') || text.includes('❌')) {
+    if (text.includes('كتب') || text.includes('📚')) {
+      sessionService.setSession(msg.from, 'AWAITING_UPLOAD_FILE', { contentType: 'book' });
+      await msg.reply('📤 أرسل ملف الكتاب الآن (PDF, EPUB, MOBI):\n\n💡 اكتب *إلغاء* للرجوع.');
+      return;
+    }
+    if (text.includes('إلغاء') || text === 'cancel') {
       sessionService.clearSession(msg.from);
-      await msg.reply('✅ تم إلغاء عملية الرفع.');
-      return;
-    }
-    await msg.reply('❌ اختر "صوتية" أو "فيديو" أو "إلغاء" من الاستطلاع.');
-  },
-
-  /**
-   * Receive and validate audio upload, download to local uploads/
-   * @param {object} client
-   * @param {object} msg
-   */
-  async handleAudioUpload(client, msg) {
-    try {
-      const buffer = await downloadMediaMessage(
-        msg.raw, 
-        'buffer', 
-        { }, 
-        { logger }
-      );
-      
-      if (!buffer) {
-        throw new Error('Failed to download media buffer');
-      }
-
-      // Validate audio file by checking common audio magic bytes
-      const header = buffer.subarray(0, 12);
-      const headerHex = header.toString('hex').toLowerCase();
-      
-      // MP3: ID3 tag or MPEG sync
-      const isMP3 = headerHex.startsWith('494433') || (header[0] === 0xFF && (header[1] & 0xE0) === 0xE0);
-      // M4A/AAC: ftyp box
-      const isM4A = headerHex.substring(8, 16) === '66747970'; // 'ftyp'
-      // OGG: OggS
-      const isOGG = headerHex.startsWith('4f676753');
-      // WAV: RIFF
-      const isWAV = headerHex.startsWith('52494646');
-      // FLAC: fLaC
-      const isFLAC = headerHex.startsWith('664c6143');
-      // WEBM/MKV: EBML
-      const isWEBM = headerHex.startsWith('1a45dfa3');
-
-      // Check mimetype from message
-      const mimetype = msg.mimetype || '';
-      const isValidMime = mimetype.startsWith('audio/') || 
-                          mimetype === 'application/octet-stream' ||
-                          mimetype === 'video/ogg'; // some ogg files are reported as video
-
-      if (!isMP3 && !isM4A && !isOGG && !isWAV && !isFLAC && !isWEBM && !isValidMime) {
-        await msg.reply('❌ عذراً، الملف المرسل لا يبدو ملفاً صوتياً صالحاً.\n\nيرجى إرسال ملف بأحد الصيغ المدعومة: MP3, M4A, AAC, OGG, WAV, FLAC.');
-        sessionService.clearSession(msg.from);
-        return;
-      }
-
-      // Check size limit (bytes to MB)
-      const sizeMb = buffer.length / (1024 * 1024);
-      if (sizeMb > config.maxFileSizeMb) {
-        await msg.reply(`❌ عذراً، حجم الملف (${sizeMb.toFixed(2)} MB) يتجاوز الحد المسموح به وهو *${config.maxFileSizeMb} MB*.`);
-        sessionService.clearSession(msg.from);
-        return;
-      }
-
-      // Determine extension
-      let ext = '.mp3';
-      if (isOGG || mimetype.includes('ogg')) ext = '.ogg';
-      else if (isM4A || mimetype.includes('mp4') || mimetype.includes('m4a')) ext = '.m4a';
-      else if (isWAV || mimetype.includes('wav')) ext = '.wav';
-      else if (isFLAC || mimetype.includes('flac')) ext = '.flac';
-      else if (isWEBM || mimetype.includes('webm')) ext = '.webm';
-      else if (mimetype.includes('aac')) ext = '.aac';
-
-      // Save to temporary uploads file
-      const tempId = uuidv4();
-      const tempFilename = `upload_${tempId}${ext}`;
-      const tempPath = path.join(config.rootDir, 'uploads', tempFilename);
-      
-      fs.writeFileSync(tempPath, buffer);
-
-      // Save file details in user session
-      sessionService.setSession(msg.from, 'AWAITING_ADD_TITLE', {
-        audio_temp: tempPath,
-        file_size: buffer.length,
-        file_ext: ext
-      });
-
-      await msg.reply(`📥 تم استلام الملف الصوتي بنجاح! (${sizeMb.toFixed(2)} MB)\n\nمن فضلك أرسل *عنوان الصوتية* الآن:`);
-    } catch (err) {
-      logger.error(`Error during audio upload handling: ${err.message}`);
-      await msg.reply('❌ حدث خطأ أثناء تحميل واستلام الملف. يرجى إعادة المحاولة.');
-      sessionService.clearSession(msg.from);
+      return await this.handleStart(client, msg);
     }
   },
 
-  /**
-   * Receive and validate video upload, download to local uploads/
-   * @param {object} client
-   * @param {object} msg
-   */
-  async handleVideoUpload(client, msg) {
+  async handleFileUpload(client, msg) {
     try {
-      const buffer = await downloadMediaMessage(
-        msg.raw, 'buffer', {}, { logger }
-      );
-      if (!buffer) {
-        throw new Error('Failed to download media buffer');
-      }
+      const session = sessionService.getSession(msg.from);
+      const contentType = session?.data?.contentType || 'audio';
+      const typeObj = CONTENT_TYPES[contentType] || CONTENT_TYPES.audio;
 
-      const header = buffer.subarray(0, 12);
-      const headerHex = header.toString('hex').toLowerCase();
-
-      const isMP4 = headerHex.substring(8, 16) === '66747970';
-      const isWEBM = headerHex.startsWith('1a45dfa3');
-      const isAVI = headerHex.startsWith('52494646');
-
-      const mimetype = msg.mimetype || '';
-      const isValidMime = mimetype.startsWith('video/');
-
-      if (!isMP4 && !isWEBM && !isAVI && !isValidMime) {
-        await msg.reply('❌ الملف لا يبدو ملف فيديو صالحاً.\n\nالصيغ المدعومة: MP4, MKV, WEBM, AVI, MOV.');
-        sessionService.clearSession(msg.from);
-        return;
-      }
+      const buffer = await downloadMediaMessage(msg.raw, 'buffer', {}, { logger });
+      if (!buffer) throw new Error('Download failed');
 
       const sizeMb = buffer.length / (1024 * 1024);
       if (sizeMb > config.maxFileSizeMb) {
-        await msg.reply(`❌ حجم الملف (${sizeMb.toFixed(2)} MB) يتجاوز *${config.maxFileSizeMb} MB*.`);
+        await msg.reply(`❌ حجم الملف يتجاوز الحد المسموح (${config.maxFileSizeMb} MB).`);
         sessionService.clearSession(msg.from);
         return;
       }
 
-      let ext = '.mp4';
-      if (isWEBM || mimetype.includes('webm')) ext = '.webm';
-      else if (isAVI || mimetype.includes('avi')) ext = '.avi';
-      else if (mimetype.includes('mkv')) ext = '.mkv';
-      else if (mimetype.includes('mov') || mimetype.includes('quicktime')) ext = '.mov';
-
       const tempId = uuidv4();
-      const tempFilename = `video_${tempId}${ext}`;
-      const tempPath = path.join(config.rootDir, 'uploads', tempFilename);
-
+      const ext = path.extname(msg.filename || '') || (contentType === 'book' ? '.pdf' : contentType === 'video' ? '.mp4' : '.mp3');
+      const tempPath = path.join(config.rootDir, 'uploads', `user_${tempId}${ext}`);
       fs.writeFileSync(tempPath, buffer);
 
       sessionService.setSession(msg.from, 'AWAITING_ADD_TITLE', {
-        audio_temp: tempPath,
-        file_size: buffer.length,
-        file_ext: ext,
-        media_type: 'video'
+        contentType,
+        tempPath,
+        fileSize: buffer.length,
+        ext
       });
 
-      await msg.reply(`📥 تم استلام الفيديو بنجاح! (${sizeMb.toFixed(2)} MB)\n\nمن فضلك أرسل *عنوان الفيديو* الآن:`);
+      await msg.reply(`📥 تم استلام ملف ${typeObj.label} بنجاح! (${sizeMb.toFixed(2)} MB)\n\n✍️ أرسل *العنوان* الآن:`);
     } catch (err) {
-      logger.error(`Error during video upload: ${err.message}`);
-      await msg.reply('❌ حدث خطأ أثناء استلام الفيديو.');
-      sessionService.clearSession(msg.from);
+      logger.error(`Error during file upload: ${err.message}`);
+      await msg.reply('❌ حدث خطأ أثناء استلام الملف. تأكد من إرسال مستند صالح.');
     }
   },
 
-  /**
-   * Save audio title from wizard
-   * @param {object} client
-   * @param {object} msg
-   * @param {object} session
-   */
-  async handleAddTitle(client, msg, session) {
+  async handleAddTitle(client, msg) {
     const title = msg.body.trim();
     if (title.length < 2) {
-      await msg.reply('❌ عنوان الصوتية قصير جداً. يرجى كتابة عنوان صحيح:');
+      await msg.reply('❌ العنوان قصير جداً. أعد المحاولة:');
       return;
     }
 
-    sessionService.setSession(msg.from, 'AWAITING_ADD_AUTHOR', { title });
-    await msg.reply('ممتاز! من فضلك أرسل *اسم المقدم أو الشيخ*:');
-  },
+    const session = sessionService.getSession(msg.from);
+    const contentType = session?.data?.contentType || 'audio';
 
-  /**
-   * Save presenter from wizard
-   * @param {object} client
-   * @param {object} msg
-   * @param {object} session
-   */
-  async handleAddAuthor(client, msg, session) {
-    const presenter = msg.body.trim();
-    if (presenter.length < 2) {
-      await msg.reply('❌ اسم المقدم قصير جداً. يرجى إدخال اسم صحيح:');
-      return;
-    }
-
-    if (session.data.media_type === 'video') {
-      sessionService.setSession(msg.from, 'AWAITING_ADD_LOCATION', { presenter });
-      await msg.reply('📍 من فضلك أرسل *المكان* (اسم المسجد، المنطقة) أو أرسل "تخطي" للمتابعة:');
-      return;
-    }
-
-    sessionService.setSession(msg.from, 'AWAITING_ADD_CATEGORY', { presenter });
-
-    let catMsg = `📁 اختر *تصنيف الصوتية* بالنقر على خيار الاستطلاع أدناه أو إرسال الرقم:\n\n`;
-    config.categories.forEach((cat, index) => {
-      catMsg += `*${index + 1}* - ${cat}\n`;
-    });
-    
-    await msg.reply(catMsg);
-
-    try {
-      const sentMsg = await client.sendMessage(msg.remoteJid, {
-        poll: {
-          name: "📁 اختر تصنيف الصوتية المناسب:",
-          values: config.categories.map((cat, idx) => `${idx + 1}. ${cat}`),
-          selectableCount: 1
-        }
-      });
-      if (sentMsg?.key?.id && sentMsg.message) {
-        msgStore.set(sentMsg.key.id, sentMsg.message);
-      }
-    } catch (err) {
-      logger.warn(`Could not send upload category poll: ${err.message}`);
-    }
-  },
-
-  /**
-   * Save category from wizard
-   * @param {object} client
-   * @param {object} msg
-   * @param {object} session
-   */
-  async handleAddCategory(client, msg, session) {
-    let text = msg.body.trim();
-    if (/^\d+\.\s*/.test(text)) {
-      text = text.replace(/^\d+\.\s*/, '').trim();
-    }
-
-    const index = parseInt(text, 10) - 1;
-    let category = '';
-
-    if (!isNaN(index) && index >= 0 && index < config.categories.length) {
-      category = config.categories[index];
+    if (contentType === 'book') {
+      sessionService.setSession(msg.from, 'AWAITING_ADD_AUTHOR', { title });
+      await msg.reply('✍️ أرسل *اسم المؤلف* (أو اكتب "تخطي"):');
     } else {
-      // Verify if text matches category name directly
-      const match = config.categories.find(c => c === text);
-      if (match) {
-        category = match;
-      }
+      sessionService.setSession(msg.from, 'AWAITING_ADD_AUTHOR', { title });
+      await msg.reply('👤 أرسل *اسم المقدم/الشيخ*:');
+    }
+  },
+
+  async handleAddAuthor(client, msg) {
+    const text = msg.body.trim();
+    const session = sessionService.getSession(msg.from);
+    const contentType = session?.data?.contentType || 'audio';
+    const authorOrPresenter = text.toLowerCase() === 'تخطي' ? 'غير محدد' : text;
+
+    if (contentType === 'book') {
+      sessionService.setSession(msg.from, 'AWAITING_ADD_CATEGORY', { author: authorOrPresenter });
+    } else {
+      sessionService.setSession(msg.from, 'AWAITING_ADD_CATEGORY', { presenter: authorOrPresenter });
     }
 
-    if (!category) {
-      await msg.reply('❌ خيار غير صحيح! يرجى إرسال الرقم المقابل للتصنيف الصحيح فقط.');
-      return;
-    }
-
-    sessionService.setSession(msg.from, 'AWAITING_ADD_LOCATION', { category });
-    await msg.reply('📍 من فضلك أرسل *المكان* (اسم المسجد، المنطقة، المحافظة) أو أرسل "تخطي" للمتابعة:');
+    return await this.displayCategoriesForType(client, msg, contentType, 'add');
   },
 
-  /**
-   * Save location from wizard
-   * @param {object} client
-   * @param {object} msg
-   * @param {object} session
-   */
-  async handleAddLocation(client, msg, session) {
-    const text = msg.body.trim();
-    const location = text.toLowerCase() === 'تخطي' ? '' : text;
+  async handleAddCategorySelect(client, msg, categoryName) {
+    const session = sessionService.getSession(msg.from);
+    const contentType = session?.data?.contentType || 'audio';
 
-    sessionService.setSession(msg.from, 'AWAITING_ADD_DATE', { location });
-    await msg.reply('📅 من فضلك أرسل *التاريخ الهجري* (مثال: 4 محرم 1448هـ) أو أرسل "تخطي" للمتابعة:');
+    sessionService.setSession(msg.from, 'AWAITING_ADD_DESC', { category: categoryName });
+    await msg.reply('📝 أرسل *وصفاً مختصراً* (اختياري) أو أرسل كلمة *\'تخطي\'*:');
   },
 
-  /**
-   * Save hijri date from wizard
-   * @param {object} client
-   * @param {object} msg
-   * @param {object} session
-   */
-  async handleAddDate(client, msg, session) {
+  async handleAddDescription(client, msg) {
     const text = msg.body.trim();
-    const date_hijri = text.toLowerCase() === 'تخطي' ? '' : text;
-
-    sessionService.setSession(msg.from, 'AWAITING_ADD_DESC', { date_hijri });
-    await msg.reply('📝 أرسل *وصفاً مختصراً* للصوتية (اختياري) أو أرسل كلمة *\'تخطي\'* للمتابعة:');
-  },
-
-  /**
-   * Save description and complete user audio proposal request. Notify admin!
-   * @param {object} client
-   * @param {object} msg
-   * @param {object} session
-   */
-  async handleAddDescription(client, msg, session) {
-    const text = msg.body.trim();
-    const description = text.toLowerCase() === 'تخطي' ? '' : text;
-    const { title, presenter, location, date_hijri, audio_temp, file_size, file_ext, media_type } = session.data;
-    const category = media_type === 'video' ? 'مقتطفات' : session.data.category;
-    const typeLabel = media_type === 'video' ? 'فيديو' : 'صوتية';
-    const emoji = media_type === 'video' ? '🎬' : '🎙️';
+    const desc = text.toLowerCase() === 'تخطي' ? '' : text;
+    const session = sessionService.getSession(msg.from);
+    const { contentType, tempPath, fileSize, title, author, presenter, category } = (session.data || {});
+    const typeObj = CONTENT_TYPES[contentType] || CONTENT_TYPES.audio;
 
     try {
-      const requestUuid = uuidv4();
-      
-      // Save request in DB
+      const reqUuid = uuidv4();
       await dbService.createRequest({
-        uuid: requestUuid,
+        uuid: reqUuid,
         phone: msg.from,
         title,
-        presenter,
-        category,
-        description,
-        location,
-        date_hijri,
-        audio_temp,
-        media_type: media_type || 'audio'
+        presenter: presenter || author || 'غير محدد',
+        book_author: author || '',
+        category: category || 'عام',
+        description: desc,
+        audio_temp: tempPath,
+        media_type: contentType
       });
 
-      // Clear session
       sessionService.clearSession(msg.from);
 
-      // Confirm to user
-      await msg.reply(`✅ تم استلام ${typeLabel}تك و تفاصيلها بنجاح!
-      
-سيدخل الملف مرحلة المراجعة وسنقوم بإشعارك فور اعتماده.`);
-
-      // Log action
-      await dbLog('MEDIA_PROPOSAL', `User ${msg.from} proposed ${typeLabel}: ${title} (Request UUID: ${requestUuid})`);
+      await msg.reply(`✅ تم استلام طلب إضافة ${typeObj.label} بنجاح!\n\nسيتم مراجعته وإشعارك عند القبول.`);
+      await dbLog('USER_PROPOSAL', `User ${msg.from} proposed ${contentType}: ${title}`);
 
       // Notify Admin
-      const adminMsg = `⚠️ *طلب إضافة ${typeLabel} جديدة معلق* ⚠️
-
-- *رقم الطلب:* ${requestUuid}
-- *العنوان:* ${title}
-- *المقدم:* ${presenter}
-- *المكان:* ${location || 'غير محدد'}
-- *التاريخ:* ${date_hijri || 'غير محدد'}
-- *التصنيف:* ${category}
-- *الحجم:* ${formatBytes(file_size)}
-- *المرسل:* ${msg.from}
-
-✅ للموافقة والرفع: أرسل \`قبول ${requestUuid}\`
-❌ للرفض: أرسل \`رفض ${requestUuid} [سبب الرفض]\``;
-
-      // Send notification message and the actual file to admin
       const adminJid = phoneToJid(config.adminNumber);
-      await client.sendMessage(adminJid, { text: adminMsg });
-      
-      const ext = file_ext || '.mp3';
-      const mimetype = media_type === 'video'
-        ? (VIDEO_EXTENSION_TO_MIMETYPE[ext] || 'video/mp4')
-        : (EXTENSION_TO_MIMETYPE[ext] || 'audio/mpeg');
-      
-      await client.sendMessage(adminJid, { 
-        document: fs.readFileSync(audio_temp), 
-        mimetype, 
-        fileName: `${title}${ext}`,
-        caption: `${emoji} ملف ${typeLabel}: ${title}` 
-      });
+      const adminMsg = `⚠️ *طلب إضافة ${typeObj.label} معلق* ⚠️\n\n` +
+        `- *العنوان:* ${title}\n` +
+        `- *${contentType === 'book' ? 'المؤلف' : 'المقدم'}:* ${presenter || author}\n` +
+        `- *التصنيف:* ${category}\n` +
+        `- *الحجم:* ${formatBytes(fileSize)}\n` +
+        `- *المرسل:* ${msg.from}\n\n` +
+        `✅ للموافقة: \`قبول ${reqUuid}\`\n` +
+        `❌ للرفض: \`رفض ${reqUuid}\``;
 
-      try {
-        const sentMsg = await client.sendMessage(adminJid, {
-          poll: {
-            name: `⚡ إجراء سريع للطلب (${title}):`,
-            values: [
-              `قبول ${requestUuid}`,
-              `رفض ${requestUuid}`
-            ],
-            selectableCount: 1
-          }
+      await client.sendMessage(adminJid, { text: adminMsg });
+
+      // Send document copy to admin
+      if (fs.existsSync(tempPath)) {
+        await client.sendMessage(adminJid, {
+          document: fs.readFileSync(tempPath),
+          mimetype: contentType === 'video' ? 'video/mp4' : contentType === 'book' ? 'application/pdf' : 'audio/mpeg',
+          fileName: `${title}${path.extname(tempPath)}`,
+          caption: `${typeObj.emoji} طلب جديد: ${title}`
         });
-        if (sentMsg?.key?.id && sentMsg.message) {
-          msgStore.set(sentMsg.key.id, sentMsg.message);
-        }
-      } catch (e) {
-        logger.warn(`Failed to send admin action poll for request ${requestUuid}: ${e.message}`);
       }
 
-      logger.info(`Notified admin about pending request: ${requestUuid}`);
     } catch (err) {
-      logger.error(`Error finalizing audio upload request: ${err.message}`);
-      await msg.reply('❌ حدث خطأ غير متوقع أثناء إرسال طلبك للإدارة. يرجى التواصل مع المسؤولين.');
-      sessionService.clearSession(msg.from);
+      logger.error(`Error completing user add proposal: ${err.message}`);
+      await msg.reply('❌ حدث خطأ أثناء تقديم الطلب.');
     }
   }
 };

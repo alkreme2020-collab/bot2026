@@ -10,11 +10,11 @@ export function normalizeArabic(text) {
   return String(text)
     .trim()
     .toLowerCase()
-    .replace(/[\u064B-\u0652]/g, '') // Remove diacritics (Fatha, Damma, Kasra, etc.)
-    .replace(/[أإآ]/g, 'ا')         // Unify Alefs to bare Alef
-    .replace(/ة/g, 'ه')             // Unify Teh Marbouta to Heh
-    .replace(/[يى]/g, 'ي')          // Unify Dotless Yae (Alif Maqsurah) and Yae
-    .replace(/\s+/g, ' ');          // Collapse double spacing
+    .replace(/[\u064B-\u0652]/g, '') // Remove diacritics
+    .replace(/[أإآ]/g, 'ا')         // Unify Alefs
+    .replace(/ة/g, 'ه')             // Unify Teh Marbouta
+    .replace(/[يى]/g, 'ي')          // Unify Yae
+    .replace(/\s+/g, ' ');          // Collapse spaces
 }
 
 /**
@@ -46,33 +46,43 @@ function getLevenshteinDistance(a, b) {
 
 export const searchService = {
   /**
-   * Search audios cached in memory using substring, word-overlap, and Levenshtein distance.
+   * Search items cached in memory using substring, word-overlap, and Levenshtein distance.
    * @param {string} query
-   * @returns {Array<object>} - Sorted list of matching audios
+   * @param {string} [contentType='audio'] - 'audio', 'video', or 'book'
+   * @returns {Array<object>} - Sorted list of matching items
    */
-  search(query) {
+  search(query, contentType = 'audio') {
     if (!query || !query.trim()) return [];
 
     const normQuery = normalizeArabic(query);
     const queryWords = normQuery.split(' ').filter(w => w.length > 0);
-    const cachedAudios = cacheService.getAudios();
+    
+    let cachedItems = [];
+    if (contentType === 'video') {
+      cachedItems = cacheService.getVideos();
+    } else if (contentType === 'book') {
+      cachedItems = cacheService.getBooks();
+    } else {
+      cachedItems = cacheService.getAudios();
+    }
+
     const matches = [];
 
-    for (const audio of cachedAudios) {
-      const titleNorm = normalizeArabic(audio.title);
-      const presenterNorm = normalizeArabic(audio.presenter);
-      const categoryNorm = normalizeArabic(audio.category);
-      const descNorm = normalizeArabic(audio.description || '');
-      const keywordsNorm = normalizeArabic(audio.keywords || '');
+    for (const item of cachedItems) {
+      const titleNorm = normalizeArabic(item.title);
+      const authorOrPresenterNorm = normalizeArabic(item.presenter || item.author || '');
+      const categoryNorm = normalizeArabic(item.category);
+      const descNorm = normalizeArabic(item.description || '');
+      const keywordsNorm = normalizeArabic(item.keywords || '');
 
       let score = 0;
 
-      // 1. Direct match on full query (High Priority)
+      // 1. Direct match on full query
       if (titleNorm === normQuery) {
         score += 150;
       } else if (titleNorm.includes(normQuery)) {
         score += 100;
-      } else if (presenterNorm.includes(normQuery)) {
+      } else if (authorOrPresenterNorm.includes(normQuery)) {
         score += 80;
       } else if (keywordsNorm.includes(normQuery)) {
         score += 60;
@@ -82,13 +92,13 @@ export const searchService = {
         score += 20;
       }
 
-      // 2. Word matching (for multi-word searches)
+      // 2. Word matching
       let matchedWordsCount = 0;
       for (const word of queryWords) {
         if (titleNorm.includes(word)) {
           score += 20;
           matchedWordsCount++;
-        } else if (presenterNorm.includes(word)) {
+        } else if (authorOrPresenterNorm.includes(word)) {
           score += 15;
           matchedWordsCount++;
         } else if (keywordsNorm.includes(word)) {
@@ -100,34 +110,32 @@ export const searchService = {
         }
       }
 
-      // Boost score if all search words match somewhere
       if (queryWords.length > 1 && matchedWordsCount === queryWords.length) {
         score += 50;
       }
 
-      // 3. Fuzzy Levenshtein Distance matching for single-word queries
+      // 3. Fuzzy Levenshtein Distance matching
       if (queryWords.length === 1 && normQuery.length >= 3) {
         const titleWords = titleNorm.split(' ');
         for (const titleWord of titleWords) {
           if (titleWord.length >= 3) {
             const distance = getLevenshteinDistance(normQuery, titleWord);
             if (distance === 1) {
-              score += 30; // Minor typo
+              score += 30;
             } else if (distance === 2) {
-              score += 10; // Medium typo
+              score += 10;
             }
           }
         }
       }
 
       if (score > 0) {
-        matches.push({ audio, score });
+        matches.push({ item, score });
       }
     }
 
-    // Sort audios descending by match relevance score
     return matches
       .sort((a, b) => b.score - a.score)
-      .map(m => m.audio);
+      .map(m => m.item);
   }
 };

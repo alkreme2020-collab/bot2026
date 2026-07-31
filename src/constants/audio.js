@@ -33,14 +33,38 @@ export const VIDEO_EXTENSION_TO_MIMETYPE = {
   '.m4v': 'video/mp4',
 };
 
+export const SUPPORTED_BOOK_MIMETYPES = [
+  'application/pdf',
+  'application/epub+zip',
+  'application/x-mobipocket-ebook',
+  'application/octet-stream',
+];
+
+export const SUPPORTED_BOOK_EXTENSIONS = ['.pdf', '.epub', '.mobi'];
+
+export const BOOK_EXTENSION_TO_MIMETYPE = {
+  '.pdf': 'application/pdf',
+  '.epub': 'application/epub+zip',
+  '.mobi': 'application/x-mobipocket-ebook',
+};
+
+export const CONTENT_TYPES = {
+  audio: { key: 'audio', label: 'صوتيات', emoji: '🎧' },
+  video: { key: 'video', label: 'فيديوهات', emoji: '🎬' },
+  book: { key: 'book', label: 'كتب', emoji: '📚' },
+};
+
 export const MAIN_MENU_OPTIONS = [
-  "🔍 البحث عن صوتية",
+  "🔍 بحث عن محتوى",
   "📂 التصنيفات",
-  "📋 جميع الصوتيات",
-  "✨ أحدث الصوتيات",
-  "🆕 جديد الأسبوع",
-  "⭐ المفضلة",
+  "🎧 جميع الصوتيات",
+  "🎬 جميع الفيديوهات",
+  "📚 جميع الكتب",
+  "🆕 صوتية الأسبوع",
+  "🎬 فيديو الأسبوع",
+  "📖 كتاب الأسبوع",
+  "➕ إضافة محتوى",
   "🔔 الاشتراك",
-  "📤 إضافة صوتية",
+  "ℹ️ نبذة عن البوت",
   "📊 إحصائيات المكتبة"
 ];

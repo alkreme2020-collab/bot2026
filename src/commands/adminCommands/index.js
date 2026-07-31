@@ -8,7 +8,7 @@ import { hfService } from '../../services/hfService.js';
 import { cacheService } from '../../services/cacheService.js';
 import { sessionService } from '../../services/sessionService.js';
 import logger, { dbLog } from '../../utils/logger.js';
-import { formatBytes, userCommands } from '../userCommands.js';
+import { formatBytes, userCommands } from '../userCommands/index.js';
 import { phoneToJid } from '../../utils/jidHelper.js';
 import { hfSessionSync } from '../../services/hfSessionSync.js';
 
@@ -30,26 +30,62 @@ function computeFileSha256(filePath) {
 
 export const adminCommands = {
   /**
+   * Display simplified admin help text
+   */
+  async showAdminHelp(client, msg) {
+    const text = `🛠️ *أوامر لوحة التحكم للأدمن:*
+━━━━━━━━━━━━━━━━━━
+
+📌 *إدارة الطلبات:*
+• \`طلبات\` — عرض قائمة الطلبات المعلقة
+• \`قبول [رقم_الطلب]\` — قبول وإضافة المحتوى
+• \`رفض [رقم_الطلب] [السبب]\` — رفض الطلب
+
+📌 *إدارة المحتوى:*
+• \`حذف [UUID أو الاسم]\` — حذف صوتية/فيديو/كتاب
+• \`تعديل [UUID] العنوان:جديد | المقدم:جديد | القسم:جديد\`
+
+📌 *إدارة التصنيفات:*
+• \`تصنيفات الأدمن\` — عرض قائمة التصنيفات حسب النوع
+• \`إضافة تصنيف [صوت|فيديو|كتاب] [الاسم]\` — إضافة تصنيف جديد
+• \`حذف تصنيف [الاسم]\` — حذف تصنيف
+
+📌 *أدوات المنظومة:*
+• \`تقرير\` — التقرير الإحصائي الشامل
+• \`رسالة جماعية [النص]\` — إرسال إشعار عام للكل
+• \`نسخة احتياطية\` — تحميل ملف قاعدة البيانات
+• \`تحديث الفهرس\` — إعادة بناء التخزين المؤقت
+• \`تنظيف المؤقت\` — مسح الملفات المؤقتة الزائدة
+• \`فحص المستودع\` — اختبار الاتصال بـ HuggingFace`;
+
+    await msg.reply(text);
+  },
+
+  /**
    * List all pending requests
-   * @param {object} client
-   * @param {object} msg
    */
   async listRequests(client, msg) {
     try {
       const requests = await dbService.getPendingRequests();
       if (requests.length === 0) {
-        await msg.reply('📭 لا توجد أي طلبات صوتيات معلقة حالياً.');
+        await msg.reply('📭 لا توجد أي طلبات محتوى معلقة حالياً.');
         return;
       }
 
-      let response = `⏳ *طلبات الصوتيات المعلقة للمراجعة:* \n\n`;
+      let response = `⏳ *طلبات المحتوى المعلقة للمراجعة (${requests.length}):*\n━━━━━━━━━━━━━━━━━━\n\n`;
       requests.forEach((req) => {
+        const typeLabel = req.media_type === 'book' ? 'كتاب' : req.media_type === 'video' ? 'فيديو' : 'صوتية';
         response += `📝 *رقم الطلب:* \`${req.uuid}\`\n`;
-        response += `🎙️ *عنوان الصوتية:* ${req.title}\n`;
-        response += `👤 *المقدم:* ${req.presenter} | 📂 *التصنيف:* ${req.category}\n`;
-        response += `📍 *المكان:* ${req.location || 'غير محدد'} | 📅 *التاريخ:* ${req.date_hijri || 'غير محدد'}\n`;
+        response += `📦 *النوع:* ${typeLabel}\n`;
+        response += `📌 *العنوان:* ${req.title}\n`;
+        if (req.media_type === 'book') {
+          response += `✍️ *المؤلف:* ${req.book_author || 'غير محدد'}\n`;
+        } else {
+          response += `👤 *المقدم:* ${req.presenter || 'غير محدد'}\n`;
+        }
+        response += `📂 *التصنيف:* ${req.category}\n`;
         response += `📞 *المرسل:* ${req.phone}\n`;
-        response += `🔽 للقبول: \`قبول ${req.uuid}\`\n`;
+        response += `✅ للقبول: \`قبول ${req.uuid}\`\n`;
         response += `❌ للرفض: \`رفض ${req.uuid} [السبب]\`\n\n`;
       });
 
@@ -61,13 +97,9 @@ export const adminCommands = {
   },
 
   /**
-   * Approve and process an audio request
-   * @param {object} client
-   * @param {object} msg
-   * @param {string} requestId
+   * Approve and process an audio, video, or book request
    */
   async approveRequest(client, msg, requestId) {
-    // If no requestId provided, auto-pick the latest pending request
     if (!requestId || requestId.trim() === '') {
       const pending = await dbService.getPendingRequests();
       if (pending.length === 0) {
@@ -89,95 +121,99 @@ export const adminCommands = {
     }
 
     const mediaType = req.media_type || 'audio';
-    const typeLabel = mediaType === 'video' ? 'فيديو' : 'صوتية';
-    const emoji = mediaType === 'video' ? '🎬' : '🎙️';
+    const typeLabel = mediaType === 'book' ? 'كتاب' : mediaType === 'video' ? 'فيديو' : 'صوتية';
 
     await msg.reply(`⏳ جاري معالجة الطلب ورفع ${typeLabel} إلى Hugging Face...`);
 
     try {
-      // 1. Check if temporary file exists
       if (!fs.existsSync(req.audio_temp)) {
         throw new Error(`Temporary file not found at ${req.audio_temp}`);
       }
 
-      // 2. Set status to PROCESSING
       await dbService.updateRequestStatus(requestId, 'PROCESSING');
 
-      // 3. Compute SHA256 checksum and check duplicates
       const sha256 = await computeFileSha256(req.audio_temp);
       const duplicateAudio = await dbService.getAudioBySha(sha256);
-      if (duplicateAudio) {
+      const duplicateBook = await dbService.getBookBySha(sha256);
+
+      if (duplicateAudio || duplicateBook) {
         await dbService.updateRequestStatus(requestId, 'REJECTED');
         fs.unlinkSync(req.audio_temp);
         
-        await msg.reply(`❌ تم إلغاء الطلب! هذا الملف مكرر وموجود بالفعل باسم *(${duplicateAudio.title})*.`);
-        await client.sendMessage(phoneToJid(req.phone), { text: `❌ نعتذر منك، لقد تم رفض اقتراحك لـ ${typeLabel} *"${req.title}"* لأنها موجودة بالفعل في المكتبة.` });
+        await msg.reply(`❌ تم إلغاء الطلب! هذا الملف مكرر وموجود بالفعل في المكتبة.`);
+        await client.sendMessage(phoneToJid(req.phone), { text: `❌ نعتذر منك، لقد تم رفض اقتراحك لـ ${typeLabel} *"${req.title}"* لأنها موجودة بالفعل في المنصة.` });
         return;
       }
 
-      // 4. Get file size
       const stats = fs.statSync(req.audio_temp);
       const fileSize = stats.size;
+      const contentUuid = uuidv4();
+      const ext = path.extname(req.audio_temp) || (mediaType === 'book' ? '.pdf' : mediaType === 'video' ? '.mp4' : '.mp3');
 
-      // 5. Generate UUID
-      const audioUuid = uuidv4();
+      // Upload to HF
+      let hfFolder = 'audios';
+      if (mediaType === 'video') hfFolder = 'videos';
+      if (mediaType === 'book') hfFolder = 'books';
 
-      // 6. Determine extension from temp file path
-      const ext = path.extname(req.audio_temp) || '.mp3';
-
-      // 7. Upload to Hugging Face (different folder for videos)
-      const hfFolder = mediaType === 'video' ? 'videos' : 'audios';
-      const hfPath = `${hfFolder}/${audioUuid}${ext}`;
+      const hfPath = `${hfFolder}/${contentUuid}${ext}`;
       const hfUrl = await hfService.uploadFile(req.audio_temp, hfPath);
 
-      // 8. Save new record in SQLite
-      await dbService.addAudio({
-        uuid: audioUuid,
+      // Save in SQLite
+      if (mediaType === 'book') {
+        await dbService.addBook({
+          uuid: contentUuid,
+          title: req.title,
+          author: req.book_author || req.presenter || 'غير محدد',
+          category: req.category || 'عام',
+          description: req.description,
+          keywords: `${req.title} ${req.book_author || ''} ${req.category}`,
+          hf_url: hfUrl,
+          pages_count: req.book_pages || 0,
+          size: fileSize,
+          sha256,
+          uploader_phone: req.phone
+        });
+      } else {
+        await dbService.addAudio({
+          uuid: contentUuid,
+          title: req.title,
+          presenter: req.presenter || 'غير محدد',
+          category: req.category,
+          description: req.description,
+          location: req.location,
+          date_hijri: req.date_hijri,
+          keywords: `${req.title} ${req.presenter} ${req.category}`,
+          hf_url: hfUrl,
+          size: fileSize,
+          sha256,
+          media_type: mediaType
+        });
+      }
+
+      await dbService.updateRequestStatus(requestId, 'APPROVED');
+      await cacheService.refresh();
+      await hfSessionSync.forceUploadDatabase();
+
+      // Notify Subscribers
+      await userCommands.notifySubscribers(client, {
         title: req.title,
-        presenter: req.presenter,
+        presenter: req.presenter || req.book_author,
         category: req.category,
-        description: req.description,
-        location: req.location,
-        date_hijri: req.date_hijri,
-        keywords: `${req.title} ${req.presenter} ${req.category}`,
-        hf_url: hfUrl,
         size: fileSize,
-        sha256,
         media_type: mediaType
       });
 
-      // 9. Update request status to APPROVED
-      await dbService.updateRequestStatus(requestId, 'APPROVED');
+      if (fs.existsSync(req.audio_temp)) {
+        fs.unlinkSync(req.audio_temp);
+      }
 
-      // 10. Refresh audios cache
-      await cacheService.refresh();
+      await dbLog('CONTENT_APPROVED', `Admin approved request ${requestId}. ${typeLabel} uuid: ${contentUuid}`);
 
-      // 11. Persist database to Hugging Face
-      await hfSessionSync.forceUploadDatabase();
-
-      // 12. Notify subscribers
-      const mediaData = {
-        title: req.title,
-        presenter: req.presenter,
-        category: req.category,
-        location: req.location,
-        date_hijri: req.date_hijri,
-        size: fileSize,
-        media_type: mediaType
-      };
-      await userCommands.notifySubscribers(client, mediaData);
-
-      // Cleanup local temp file
-      fs.unlinkSync(req.audio_temp);
-
-      // Log DB audit trail
-      await dbLog('MEDIA_APPROVED', `Admin approved request ${requestId}. ${typeLabel} uuid: ${audioUuid}`);
-
-      // Notify Admin and user
-      await msg.reply(`✅ تم قبول ${typeLabel} بنجاح ورفعها للفهرس!\n\n🔗 رابط الملف: ${hfUrl}`);
+      await msg.reply(`✅ تم قبول ${typeLabel} بنجاح ورفعها للمنصة!\n\n🔗 الرابط: ${hfUrl}`);
       
-      const userMsg = `🎉 بشرى سارة! تمت الموافقة على ${typeLabel}تك المقترحة *"${req.title}"* وتمت إضافتها للمكتبة! شكرًا لك.`;
+      const userMsg = `🎉 بشرى سارة! تمت الموافقة على ${typeLabel}تك المقترحة *"${req.title}"* وتمت إضافتها للمنصة! شكرًا لك.`;
       await client.sendMessage(phoneToJid(req.phone), { text: userMsg });
+
     } catch (err) {
       logger.error(`Error approving request ${requestId}: ${err.message}`);
       await msg.reply(`❌ فشلت عملية المعالجة والقبول: ${err.message}`);
@@ -186,14 +222,9 @@ export const adminCommands = {
   },
 
   /**
-   * Reject an audio request with a reason
-   * @param {object} client
-   * @param {object} msg
-   * @param {string} requestId
-   * @param {string} reason
+   * Reject a request with a reason
    */
   async rejectRequest(client, msg, requestId, reason) {
-    // If no requestId provided, auto-pick the latest pending request
     if (!requestId || requestId.trim() === '') {
       const pending = await dbService.getPendingRequests();
       if (pending.length === 0) {
@@ -216,29 +247,22 @@ export const adminCommands = {
 
     if (!reason || reason.trim() === '' || reason === 'غير محدد') {
       sessionService.setSession(msg.from, 'AWAITING_REJECT_REASON', { rejectRequestId: requestId });
-      
-      await msg.reply(`📝 يرجى كتابة سبب الرفض لصوتية *"${req.title}"* لإرساله للمستخدم.\n\n(أو أرسل "تخطي" للرفض بدون تحديد سبب).`);
+      await msg.reply(`📝 اكتب سبب الرفض لـ *"${req.title}"* (أو أرسل "تخطي"):`);
       return;
     }
 
     try {
-
-      // Update status to REJECTED
       await dbService.updateRequestStatus(requestId, 'REJECTED');
-
-      // Cleanup file if it exists
       if (fs.existsSync(req.audio_temp)) {
         fs.unlinkSync(req.audio_temp);
       }
 
-      // Log database audit trail
-      await dbLog('AUDIO_REJECTED', `Admin rejected request ${requestId} for reason: ${reason}`);
-
+      await dbLog('CONTENT_REJECTED', `Admin rejected request ${requestId} for reason: ${reason}`);
       await msg.reply('✅ تم رفض الطلب وحذف الملف المؤقت بنجاح.');
       
       await client.sendMessage(
         phoneToJid(req.phone),
-        { text: `❌ نعتذر منك، لقد تم رفض صوتيتك المقترحة *"${req.title}"*.\n\n*سبب الرفض:* ${reason}` }
+        { text: `❌ نعتذر منك، لقد تم رفض المحتوى المقترح *"${req.title}"*.\n\n*سبب الرفض:* ${reason}` }
       );
     } catch (err) {
       logger.error(`Error rejecting request: ${err.message}`);
@@ -247,105 +271,114 @@ export const adminCommands = {
   },
 
   /**
-   * Delete an existing audio/video. Supports partial title search with confirmation.
-   * @param {object} client
-   * @param {object} msg
-   * @param {string} query - Audio UUID or title (partial match)
+   * Delete content (Audio, Video, or Book)
    */
   async deleteAudio(client, msg, query) {
     if (!query) {
-      await msg.reply('❌ يرجى كتابة الـ UUID أو اسم الملف المراد حذفه (مثال: `حذف [المعرف]`).');
+      await msg.reply('❌ يرجى كتابة الـ UUID أو اسم الملف المراد حذفه.');
       return;
     }
 
     try {
-      let audio = await dbService.getAudioByUuid(query);
-      if (!audio) {
-        const all = cacheService.getAudios();
-        const matches = all.filter(a =>
-          a.title.toLowerCase().includes(query.toLowerCase())
-        );
+      let item = await dbService.getAudioByUuid(query);
+      let isBook = false;
 
-        if (matches.length === 0) {
-          await msg.reply('❌ لم يتم العثور على أي صوتية تطابق المدخلات.');
+      if (!item) {
+        item = await dbService.getBookByUuid(query);
+        if (item) isBook = true;
+      }
+
+      if (!item) {
+        const allAudios = cacheService.getAudios();
+        const allVideos = cacheService.getVideos();
+        const allBooks = cacheService.getBooks();
+
+        const matchesAudio = allAudios.filter(a => a.title.toLowerCase().includes(query.toLowerCase()));
+        const matchesVideo = allVideos.filter(v => v.title.toLowerCase().includes(query.toLowerCase()));
+        const matchesBook = allBooks.filter(b => b.title.toLowerCase().includes(query.toLowerCase()));
+
+        const totalMatches = [...matchesAudio, ...matchesVideo, ...matchesBook];
+
+        if (totalMatches.length === 0) {
+          await msg.reply('❌ لم يتم العثور على أي محتوى يطابق المدخلات.');
           return;
         }
 
-        if (matches.length > 1) {
+        if (totalMatches.length > 1) {
           let list = '🔍 *نتائج البحث (اختر UUID للحذف المباشر):*\n\n';
-          matches.slice(0, 10).forEach((a, i) => {
-            list += `${i + 1}. *${a.title}* (${a.presenter})\n   📎 \`${a.uuid}\`\n`;
+          totalMatches.slice(0, 10).forEach((a, i) => {
+            list += `${i + 1}. *${a.title}*\n   📎 \`${a.uuid}\`\n`;
           });
           list += '\nأرسل `حذف [الـ UUID]` للحذف المباشر.';
           await msg.reply(list);
           return;
         }
 
-        audio = matches[0];
+        item = totalMatches[0];
+        if (matchesBook.includes(item)) isBook = true;
       }
 
-      // Confirm deletion
-      const ext = audio.hf_url ? path.extname(new URL(audio.hf_url).pathname) : '.mp3';
-      const mediaType = audio.media_type || 'audio';
-      const typeLabel = mediaType === 'video' ? 'فيديو' : 'صوتية';
+      const mediaType = isBook ? 'book' : (item.media_type || 'audio');
+      const typeLabel = mediaType === 'book' ? 'كتاب' : mediaType === 'video' ? 'فيديو' : 'صوتية';
 
-      sessionService.setSession(msg.from, 'AWAITING_DELETE_CONFIRM', { deleteUuid: audio.uuid });
+      sessionService.setSession(msg.from, 'AWAITING_DELETE_CONFIRM', { deleteUuid: item.uuid, isBook });
 
       await msg.reply(`⚠️ تأكيد حذف ${typeLabel}:
 
-*العنوان:* ${audio.title}
-*المقدم:* ${audio.presenter}
-*التصنيف:* ${audio.category}
-*الـ UUID:* \`${audio.uuid}\`
+*العنوان:* ${item.title}
+*التصنيف:* ${item.category}
+*الـ UUID:* \`${item.uuid}\`
 
-للتأكيد أرسل: *تأكيد حذف ${audio.uuid}*
-للإلغاء: أرسل *إلغاء*`);
+للتأكيد أرسل: *تأكيد حذف ${item.uuid}*
+للإلغاء أرسل: *إلغاء*`);
+
     } catch (err) {
       logger.error(`Error during delete lookup: ${err.message}`);
-      await msg.reply('❌ فشل البحث عن الصوتية للحذف.');
+      await msg.reply('❌ فشل البحث عن المحتوى للحذف.');
     }
   },
 
   /**
-   * Confirm and execute deletion of an audio/video from DB and HF.
-   * @param {object} client
-   * @param {object} msg
-   * @param {string} uuid
+   * Confirm deletion
    */
   async confirmDelete(client, msg, uuid) {
     try {
-      const audio = await dbService.getAudioByUuid(uuid);
-      if (!audio) {
-        await msg.reply('❌ لم يتم العثور على الصوتية.');
+      const session = sessionService.getSession(msg.from);
+      const isBook = session?.data?.isBook;
+
+      let item = isBook ? await dbService.getBookByUuid(uuid) : await dbService.getAudioByUuid(uuid);
+      if (!item && !isBook) {
+        item = await dbService.getBookByUuid(uuid);
+      }
+
+      if (!item) {
+        await msg.reply('❌ لم يتم العثور على المحتوى.');
         return;
       }
 
-      await msg.reply(`⏳ جاري حذف ${audio.title} من قاعدة البيانات و Hugging Face...`);
+      await msg.reply(`⏳ جاري حذف ${item.title}...`);
 
-      // Delete from Hugging Face
-      if (audio.hf_url) {
+      if (item.hf_url) {
         try {
-          const urlPath = new URL(audio.hf_url).pathname;
+          const urlPath = new URL(item.hf_url).pathname;
           const hfPath = urlPath.substring(urlPath.indexOf('/') + 1).split('/').slice(1).join('/');
           if (hfPath) {
             await hfService.deleteFile(hfPath);
           }
-        } catch (hfErr) {
-          logger.warn(`Could not delete HF file: ${hfErr.message}`);
-        }
+        } catch (e) {}
       }
 
-      // Delete from database
-      await dbService.deleteAudio(uuid);
-      await cacheService.refresh();
+      if (isBook) {
+        await dbService.deleteBook(uuid);
+      } else {
+        await dbService.deleteAudio(uuid);
+      }
 
-      // Persist database to Hugging Face
+      await cacheService.refresh();
       await hfSessionSync.forceUploadDatabase();
 
-      const typeLabel = (audio.media_type || 'audio') === 'video' ? 'فيديو' : 'صوتية';
-      await msg.reply(`✅ تم حذف ${typeLabel} *(${audio.title})* نهائياً من قاعدة البيانات و Hugging Face.`);
-
-      await dbLog('MEDIA_DELETED', `Admin deleted ${typeLabel} ${uuid} (${audio.title})`);
+      await msg.reply(`✅ تم حذف *(${item.title})* نهائياً.`);
+      await dbLog('CONTENT_DELETED', `Admin deleted ${uuid} (${item.title})`);
     } catch (err) {
       logger.error(`Error confirming deletion: ${err.message}`);
       await msg.reply('❌ فشل الحذف.');
@@ -353,122 +386,128 @@ export const adminCommands = {
   },
 
   /**
-   * Edit an existing audio's details
-   * Command Format: تعديل uuid العنوان:الجديد | المقدم:الجديد | التصنيف:الجديد
-   * @param {object} client
-   * @param {object} msg
-   * @param {string} text - Command parameters
-   */
-  async editAudio(client, msg, text) {
-    const parts = text.split(' ');
-    const uuid = parts[0];
-    const detailsRaw = text.substring(uuid.length).trim();
-
-    if (!uuid || !detailsRaw) {
-      await msg.reply('❌ طريقة خاطئة! الصيغة: `تعديل [الـ uuid] العنوان:الاسم الجديد | المقدم:اسم المقدم | التصنيف:القسم`');
-      return;
-    }
-
-    try {
-      const audio = await dbService.getAudioByUuid(uuid);
-      if (!audio) {
-        await msg.reply('❌ لم يتم العثور على صوتية بهذا الـ UUID.');
-        return;
-      }
-
-      const updates = {};
-      const pairs = detailsRaw.split('|');
-      
-      for (const pair of pairs) {
-        const splitPair = pair.split(':');
-        if (splitPair.length >= 2) {
-          const key = splitPair[0].trim();
-          const value = splitPair.slice(1).join(':').trim();
-          
-          if (key === 'العنوان') updates.title = value;
-          if (key === 'المقدم') updates.presenter = value;
-          if (key === 'التصنيف') {
-            if (config.categories.includes(value)) {
-              updates.category = value;
-            } else {
-              await msg.reply(`⚠️ التصنيف "${value}" غير موجود بالاختيارات. تم تجاهل تعديل القسم.`);
-            }
-          }
-          if (key === 'الوصف') updates.description = value;
-          if (key === 'المكان') updates.location = value;
-          if (key === 'التاريخ') updates.date_hijri = value;
-        }
-      }
-
-      if (Object.keys(updates).length === 0) {
-        await msg.reply('❌ لم يتم توفير حقول تعديل صالحة.');
-        return;
-      }
-
-      await dbService.updateAudio(uuid, updates);
-      await cacheService.refresh();
-      await hfSessionSync.forceUploadDatabase();
-
-      await dbLog('AUDIO_EDITED', `Admin edited audio ${uuid}: ${JSON.stringify(updates)}`);
-      await msg.reply(`✅ تم تعديل بيانات صوتية *(${audio.title})* وتحديث الفهرس بنجاح.`);
-    } catch (err) {
-      logger.error(`Error editing audio details: ${err.message}`);
-      await msg.reply('❌ فشل تعديل بيانات الصوتية.');
-    }
-  },
-
-  /**
-   * Display detailed admin stats
-   * @param {object} client
-   * @param {object} msg
+   * Display Admin Dashboard Summary
    */
   async displayAdminStats(client, msg) {
     try {
       const summary = await dbService.getSummaryStats();
-      const weeklyAdded = await dbService.getAudiosAddedThisWeek();
-      const topAudios = await dbService.getTopDownloadedAudios(5);
-      const topCats = await dbService.getTopCategories();
-      const topPresenters = await dbService.getTopPresenters(5);
-      const activeUsers = await dbService.getMostActiveUsers(5);
+      const weeklyAudios = await dbService.getAudiosThisWeek();
+      const weeklyVideos = await dbService.getVideosThisWeek();
+      const weeklyBooks = await dbService.getBooksThisWeek();
 
-      let statsMsg = `📊 *تقرير إحصائيات إدارة الصوتيات:* \n\n`;
-      statsMsg += `📈 *الملخص العام:*\n`;
-      statsMsg += `- الصوتيات المؤرشفة: *${summary.totalAudios}* (جديد هذا الأسبوع: *${weeklyAdded}*)\n`;
-      statsMsg += `- المستخدمين المسجلين: *${summary.totalUsers}*\n`;
-      statsMsg += `- إجمالي التحميلات: *${summary.totalDownloads}*\n`;
-      statsMsg += `- إجمالي المقترحات: *${summary.totalRequests}*\n\n`;
+      let text = `📊 *تقرير المنصة الشامل للأدمن:*\n━━━━━━━━━━━━━━━━━━\n\n`;
+      text += `📈 *الملخص العام:*\n`;
+      text += `- 🎧 الصوتيات: *${summary.totalAudios}* (جديد الأسبوع: *${weeklyAudios.length}*)\n`;
+      text += `- 🎬 الفيديوهات: *${summary.totalVideos}* (جديد الأسبوع: *${weeklyVideos.length}*)\n`;
+      text += `- 📚 الكتب: *${summary.totalBooks}* (جديد الأسبوع: *${weeklyBooks.length}*)\n`;
+      text += `- 👥 المستخدمين المسجلين: *${summary.totalUsers}*\n`;
+      text += `- ⬇️ إجمالي التحميلات: *${summary.totalDownloads}*\n`;
+      text += `- ⏳ الطلبات المعلقة: *${summary.totalRequests}*\n`;
 
-      statsMsg += `⭐ *الصوتيات الأكثر تحميلاً:*\n`;
-      topAudios.forEach((a, i) => {
-        statsMsg += `${i + 1}. *${a.title}* (${a.downloads} تحميل)\n`;
-      });
-      statsMsg += `\n📂 *التصنيفات الأكثر نشاطاً:*\n`;
-      topCats.forEach((c) => {
-        statsMsg += `- ${c.category}: *${c.count}* صوتية\n`;
-      });
-
-      statsMsg += `\n👤 *أكثر المقدمين طلباً:*\n`;
-      topPresenters.forEach((p) => {
-        statsMsg += `- ${p.presenter}: *${p.count}* صوتية\n`;
-      });
-
-      statsMsg += `\n👥 *المستخدمون الأكثر نشاطاً:*\n`;
-      activeUsers.forEach((u) => {
-        statsMsg += `- ${u.name} (${u.phone.split('@')[0]}): *${u.download_count}* تحميل\n`;
-      });
-
-      await msg.reply(statsMsg);
+      await msg.reply(text);
     } catch (err) {
       logger.error(`Error displaying admin stats: ${err.message}`);
-      await msg.reply('❌ فشل توليد التقرير الإحصائي للإدارة.');
+      await msg.reply('❌ فشل توليد التقرير الإحصائي.');
     }
   },
 
   /**
-   * Broadcast a message to all users
-   * @param {object} client
-   * @param {object} msg
-   * @param {string} text - Message to broadcast
+   * Display categories list grouped by content type
+   */
+  async listAdminCategories(client, msg) {
+    try {
+      const audioCats = await dbService.getCategoriesByType('audio');
+      const videoCats = await dbService.getCategoriesByType('video');
+      const bookCats = await dbService.getCategoriesByType('book');
+
+      let text = `📂 *تصنيفات المنصة حسب النوع:*\n━━━━━━━━━━━━━━━━━━\n\n`;
+      
+      text += `🎧 *الصوتيات:*\n`;
+      if (audioCats.length) audioCats.forEach(c => text += `• ${c.name}\n`);
+      else text += `• لا توجد\n`;
+
+      text += `\n🎬 *الفيديوهات:*\n`;
+      if (videoCats.length) videoCats.forEach(c => text += `• ${c.name}\n`);
+      else text += `• لا توجد\n`;
+
+      text += `\n📚 *الكتب:*\n`;
+      if (bookCats.length) bookCats.forEach(c => text += `• ${c.name}\n`);
+      else text += `• لا توجد\n`;
+
+      await msg.reply(text);
+    } catch (err) {
+      logger.error(`Error listing admin categories: ${err.message}`);
+      await msg.reply('❌ فشل جلب التصنيفات.');
+    }
+  },
+
+  /**
+   * Add a new category (Syntax: إضافة تصنيف [صوت|فيديو|كتاب] [الاسم])
+   */
+  async addCategory(client, msg, text) {
+    if (!text || text.trim() === '') {
+      await msg.reply('❌ الصيغة: `إضافة تصنيف [صوت|فيديو|كتاب] [اسم التصنيف]`');
+      return;
+    }
+
+    const parts = text.trim().split(' ');
+    let type = 'audio';
+    let catName = text.trim();
+
+    if (parts[0] === 'صوت' || parts[0] === 'صوتيات') {
+      type = 'audio';
+      catName = parts.slice(1).join(' ');
+    } else if (parts[0] === 'فيديو' || parts[0] === 'فيديوهات') {
+      type = 'video';
+      catName = parts.slice(1).join(' ');
+    } else if (parts[0] === 'كتاب' || parts[0] === 'كتب') {
+      type = 'book';
+      catName = parts.slice(1).join(' ');
+    }
+
+    if (!catName || !catName.trim()) {
+      await msg.reply('❌ اكتب اسم التصنيف المراد إضافته.');
+      return;
+    }
+
+    try {
+      const added = await dbService.addCategory(catName.trim(), type);
+      if (!added) {
+        await msg.reply(`⚠️ التصنيف *"${catName.trim()}"* موجود مسبقاً.`);
+        return;
+      }
+      config.categories = await dbService.getAllCategories();
+      await cacheService.refresh();
+      await dbLog('CATEGORY_ADD', `Admin added category: ${catName.trim()} (${type})`);
+      await msg.reply(`✅ تم إضافة تصنيف *"${catName.trim()}"* لنوع (${type}) بنجاح.`);
+    } catch (err) {
+      logger.error(`Error adding category: ${err.message}`);
+      await msg.reply('❌ فشل إضافة التصنيف.');
+    }
+  },
+
+  /**
+   * Delete a category
+   */
+  async removeCategory(client, msg, name) {
+    if (!name || name.trim() === '') {
+      await msg.reply('❌ يرجى كتابة اسم التصنيف المراد حذفه.');
+      return;
+    }
+    try {
+      await dbService.deleteCategory(name.trim());
+      config.categories = await dbService.getAllCategories();
+      await cacheService.refresh();
+      await dbLog('CATEGORY_DELETE', `Admin deleted category: ${name.trim()}`);
+      await msg.reply(`✅ تم حذف التصنيف *"${name.trim()}"*.`);
+    } catch (err) {
+      logger.error(`Error deleting category: ${err.message}`);
+      await msg.reply('❌ فشل حذف التصنيف.');
+    }
+  },
+
+  /**
+   * Broadcast message to all users
    */
   async broadcastMessage(client, msg, text) {
     if (!text || text.trim() === '') {
@@ -488,109 +527,60 @@ export const adminCommands = {
       let successCount = 0;
       for (const user of users) {
         try {
-          // Avoid broadcasting to the admin themselves to prevent duplicate spam
           if (user.phone === config.adminNumber) continue;
-          
-          await client.sendMessage(phoneToJid(user.phone), { text: `📢 *رسالة جماعية من إدارة مكتبة الصوتيات:*\n\n${text}` });
+          await client.sendMessage(phoneToJid(user.phone), { text: `📢 *رسالة جماعية من منصة إعلام شبوة السلفي:*\n\n${text}` });
           successCount++;
-          // Delay 3s between messages to avoid WhatsApp ban
-          await new Promise(r => setTimeout(r, 3000));
-        } catch (err) {
-          logger.warn(`Failed to send broadcast to ${user.phone}: ${err.message}`);
-        }
+          await new Promise(r => setTimeout(r, 2500));
+        } catch (err) {}
       }
 
-      await msg.reply(`✅ تم الانتهاء من الإرسال الجماعي بنجاح إلى *${successCount}* مستخدم.`);
+      await msg.reply(`✅ تم الإرسال بنجاح إلى *${successCount}* مستخدم.`);
       await dbLog('BROADCAST', `Admin broadcasted message: "${text}" to ${successCount} users`);
     } catch (err) {
       logger.error(`Error broadcasting message: ${err.message}`);
-      await msg.reply('❌ حدث خطأ أثناء محاولة الإرسال الجماعي.');
+      await msg.reply('❌ حدث خطأ أثناء الإرسال الجماعي.');
     }
   },
 
   /**
-   * Send database SQLite file to admin as a backup
-   * @param {object} client
-   * @param {object} msg
+   * Send DB Backup
    */
   async sendBackup(client, msg) {
     try {
       if (!fs.existsSync(config.dbPath)) {
-        await msg.reply('❌ قاعدة البيانات غير موجودة في هذا المسار حالياً.');
+        await msg.reply('❌ قاعدة البيانات غير موجودة حالياً.');
         return;
       }
 
-      await msg.reply('⏳ جاري تحضير ملف النسخة الاحتياطية وإرساله لك...');
-
+      await msg.reply('⏳ جاري إرسال النسخة الاحتياطية...');
       await client.sendMessage(msg.remoteJid, {
         document: fs.readFileSync(config.dbPath),
         mimetype: 'application/x-sqlite3',
         fileName: 'database.sqlite',
-        caption: `📦 *نسخة احتياطية لقاعدة البيانات* 
-        
-- *التاريخ:* ${new Date().toLocaleString('ar-EG')}
-- *المسار:* database.sqlite`
+        caption: `📦 *نسخة احتياطية لقاعدة البيانات*`
       }, { quoted: msg.raw });
 
       await dbLog('BACKUP', `Admin downloaded database backup file`);
-      logger.info('Database backup file successfully sent to admin.');
     } catch (err) {
       logger.error(`Error sending database backup: ${err.message}`);
-      await msg.reply('❌ فشل تصدير وإرسال النسخة الاحتياطية.');
+      await msg.reply('❌ فشل إرسال النسخة الاحتياطية.');
     }
   },
 
   /**
-   * Manually rebuild in-memory audios cache
-   * @param {object} client
-   * @param {object} msg
+   * Rebuild Cache
    */
   async rebuildCache(client, msg) {
     try {
       await cacheService.refresh();
-      await msg.reply(`✅ تم إعادة بناء فهرس الصوتيات بنجاح. الفهرس يحتوي حالياً على *${cacheService.getAudios().length}* صوتية.`);
+      await msg.reply(`✅ تم إعادة بناء التخزين المؤقت بنجاح.`);
     } catch (err) {
-      await msg.reply(`❌ فشلت عملية إعادة بناء الفهرس: ${err.message}`);
+      await msg.reply(`❌ فشلت العملية: ${err.message}`);
     }
   },
 
   /**
-   * Dry-run to check Hugging Face connection and configuration
-   * @param {object} client
-   * @param {object} msg
-   */
-  async resyncHf(client, msg) {
-    try {
-      if (!config.hfToken || config.hfToken.startsWith('hf_placeholder')) {
-        await msg.reply('❌ الـ Token الخاص بـ Hugging Face غير معدل في الإعدادات بشكل صحيح.');
-        return;
-      }
-      
-      // Attempt dry-run or verify repo
-      await msg.reply(`🔄 التحقق من الاتصال بمستودع Hugging Face *(${config.hfDataset})*...`);
-      
-      const response = await fetch(`https://huggingface.co/api/datasets/${config.hfDataset}`, {
-        headers: {
-          'Authorization': `Bearer ${config.hfToken}`
-        }
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        await msg.reply(`✅ تم الاتصال بنجاح بمستودع Hugging Face!\n\n- الاسم: ${data.id}\n- النوع: Dataset\n- الخصوصية: ${data.private ? 'خاص (Private)' : 'عام (Public)'}`);
-      } else {
-        throw new Error(`HF returned status ${response.status}: ${response.statusText}`);
-      }
-    } catch (err) {
-      logger.error(`Error checking Hugging Face connection: ${err.message}`);
-      await msg.reply(`❌ فشل الاتصال بـ Hugging Face: ${err.message}`);
-    }
-  },
-
-  /**
-   * Delete leftover files in temp/ and uploads/ folders
-   * @param {object} client
-   * @param {object} msg
+   * Clean Temp Files
    */
   async cleanTempFiles(client, msg) {
     try {
@@ -604,105 +594,22 @@ export const adminCommands = {
         const files = fs.readdirSync(dirPath);
         for (const file of files) {
           const filePath = path.join(dirPath, file);
-          
           let shouldDelete = true;
           if (dirName === 'uploads') {
-            // Check if file is in pending request
             const pendingReqs = await dbService.getPendingRequests();
-            const isActive = pendingReqs.some(r => r.audio_temp === filePath);
-            if (isActive) shouldDelete = false;
+            if (pendingReqs.some(r => r.audio_temp === filePath)) shouldDelete = false;
           }
-          
           if (shouldDelete) {
             fs.unlinkSync(filePath);
             deletedCount++;
           }
         }
       }
-      
-      await msg.reply(`✅ تم تنظيف المجلدات المؤقتة بنجاح. تم حذف *${deletedCount}* ملف.`);
+      await msg.reply(`✅ تم مسح *${deletedCount}* ملف مؤقت.`);
       await dbLog('CLEANUP', `Admin cleaned up ${deletedCount} temp files`);
     } catch (err) {
       logger.error(`Error cleaning temp files: ${err.message}`);
       await msg.reply('❌ فشل تنظيف الملفات المؤقتة.');
-    }
-  },
-
-  /**
-   * Add a new category.
-   * @param {object} client
-   * @param {object} msg
-   * @param {string} name
-   */
-  async addCategory(client, msg, name) {
-    if (!name || name.trim() === '') {
-      await msg.reply('❌ يرجى كتابة اسم التصنيف الجديد (مثال: `إضافة تصنيف مقتطفات`).');
-      return;
-    }
-    try {
-      const added = await dbService.addCategory(name.trim());
-      if (!added) {
-        await msg.reply(`⚠️ التصنيف *"${name.trim()}"* موجود مسبقاً.`);
-        return;
-      }
-      config.categories = await dbService.getAllCategories();
-      await cacheService.refresh();
-      await dbLog('CATEGORY_ADD', `Admin added category: ${name.trim()}`);
-      await msg.reply(`✅ تم إضافة التصنيف *"${name.trim()}"* بنجاح.`);
-    } catch (err) {
-      logger.error(`Error adding category: ${err.message}`);
-      await msg.reply('❌ فشل إضافة التصنيف.');
-    }
-  },
-
-  /**
-   * Rename a category.
-   * @param {object} client
-   * @param {object} msg
-   * @param {string} text - "الاسم_القديم:الاسم_الجديد"
-   */
-  async renameCategory(client, msg, text) {
-    const parts = text.split(':').map(s => s.trim());
-    if (parts.length < 2 || !parts[0] || !parts[1]) {
-      await msg.reply('❌ الصيغة: `تعديل تصنيف الاسم_القديم:الاسم_الجديد`');
-      return;
-    }
-    try {
-      const ok = await dbService.updateCategory(parts[0], parts[1]);
-      if (!ok) {
-        await msg.reply(`⚠️ الاسم الجديد *"${parts[1]}"* موجود مسبقاً.`);
-        return;
-      }
-      config.categories = await dbService.getAllCategories();
-      await cacheService.refresh();
-      await dbLog('CATEGORY_RENAME', `Admin renamed category: ${parts[0]} -> ${parts[1]}`);
-      await msg.reply(`✅ تم تعديل اسم التصنيف من *"${parts[0]}"* إلى *"${parts[1]}"*.`);
-    } catch (err) {
-      logger.error(`Error renaming category: ${err.message}`);
-      await msg.reply('❌ فشل تعديل اسم التصنيف.');
-    }
-  },
-
-  /**
-   * Delete a category. Audios in it are moved to the first available category.
-   * @param {object} client
-   * @param {object} msg
-   * @param {string} name
-   */
-  async removeCategory(client, msg, name) {
-    if (!name || name.trim() === '') {
-      await msg.reply('❌ يرجى كتابة اسم التصنيف المراد حذفه (مثال: `حذف تصنيف مقتطفات`).');
-      return;
-    }
-    try {
-      await dbService.deleteCategory(name.trim());
-      config.categories = await dbService.getAllCategories();
-      await cacheService.refresh();
-      await dbLog('CATEGORY_DELETE', `Admin deleted category: ${name.trim()}`);
-      await msg.reply(`✅ تم حذف التصنيف *"${name.trim()}"* ونقل الصوتيات التابعة له إلى التصنيف الافتراضي.`);
-    } catch (err) {
-      logger.error(`Error deleting category: ${err.message}`);
-      await msg.reply('❌ فشل حذف التصنيف.');
     }
   }
 };

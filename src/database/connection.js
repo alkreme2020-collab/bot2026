@@ -94,26 +94,68 @@ export async function initDatabase() {
       date DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
+    CREATE TABLE IF NOT EXISTS books (
+      uuid TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      author TEXT DEFAULT 'غير محدد',
+      category TEXT NOT NULL DEFAULT 'عام',
+      description TEXT,
+      keywords TEXT,
+      hf_url TEXT NOT NULL,
+      cover_url TEXT,
+      pages_count INTEGER DEFAULT 0,
+      size INTEGER DEFAULT 0,
+      sha256 TEXT UNIQUE,
+      downloads INTEGER DEFAULT 0,
+      uploader_phone TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE TABLE IF NOT EXISTS categories (
       name TEXT PRIMARY KEY,
+      content_type TEXT NOT NULL DEFAULT 'audio',
       display_order INTEGER DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
   `);
 
+  // Add new columns for existing databases (safe to run even if columns exist)
+  try { await db.run('ALTER TABLE audios ADD COLUMN location TEXT DEFAULT \'\''); } catch (e) {}
+  try { await db.run('ALTER TABLE audios ADD COLUMN date_hijri TEXT DEFAULT \'\''); } catch (e) {}
+  try { await db.run('ALTER TABLE requests ADD COLUMN location TEXT DEFAULT \'\''); } catch (e) {}
+  try { await db.run('ALTER TABLE requests ADD COLUMN date_hijri TEXT DEFAULT \'\''); } catch (e) {}
+  try { await db.run("ALTER TABLE requests ADD COLUMN media_type TEXT DEFAULT 'audio'"); } catch (e) {}
+  try { await db.run("ALTER TABLE requests ADD COLUMN book_author TEXT DEFAULT ''"); } catch (e) {}
+  try { await db.run("ALTER TABLE requests ADD COLUMN book_pages INTEGER DEFAULT 0"); } catch (e) {}
+  try { await db.run("ALTER TABLE audios ADD COLUMN media_type TEXT DEFAULT 'audio'"); } catch (e) {}
+  try { await db.run("ALTER TABLE categories ADD COLUMN content_type TEXT DEFAULT 'audio'"); } catch (e) {}
+  try { await db.run("ALTER TABLE downloads ADD COLUMN content_type TEXT DEFAULT 'audio'"); } catch (e) {}
+
   // Seed default categories only on first run (when table is empty)
   const catCount = await db.get('SELECT COUNT(*) as count FROM categories');
   if (catCount.count === 0) {
-    const defaultCats = ['خطب', 'محاضرات', 'دورة مهمات الشريعة', 'مقتطفات'];
-    for (let i = 0; i < defaultCats.length; i++) {
+    const defaultCats = [
+      { name: 'خطب', type: 'audio', order: 0 },
+      { name: 'محاضرات', type: 'audio', order: 1 },
+      { name: 'دورة مهمات الشريعة', type: 'audio', order: 2 },
+      { name: 'مقتطفات', type: 'video', order: 3 },
+      { name: 'عام', type: 'book', order: 4 }
+    ];
+    for (const cat of defaultCats) {
       await db.run(
-        'INSERT INTO categories (name, display_order) VALUES (?, ?)',
-        [defaultCats[i], i]
+        'INSERT INTO categories (name, content_type, display_order) VALUES (?, ?, ?)',
+        [cat.name, cat.type, cat.order]
       );
     }
     logger.info(`Categories seeded for the first time: ${defaultCats.length} categories.`);
   } else {
-    logger.info(`Categories table already has ${catCount.count} entries — skipping seed.`);
+    // Ensure default video/book categories exist if missing
+    try {
+      await db.run("UPDATE categories SET content_type = 'video' WHERE name = 'مقتطفات'");
+      await db.run("INSERT OR IGNORE INTO categories (name, content_type, display_order) VALUES ('عام', 'book', 99)");
+    } catch (e) {}
+    logger.info(`Categories table already has ${catCount.count} entries — verified types.`);
   }
 
   // Refresh config categories from database
@@ -125,14 +167,6 @@ export async function initDatabase() {
   } catch (e) {
     logger.warn(`Could not load categories from DB: ${e.message}`);
   }
-
-  // Add new columns for existing databases (safe to run even if columns exist)
-  try { await db.run('ALTER TABLE audios ADD COLUMN location TEXT DEFAULT \'\''); } catch (e) {}
-  try { await db.run('ALTER TABLE audios ADD COLUMN date_hijri TEXT DEFAULT \'\''); } catch (e) {}
-  try { await db.run('ALTER TABLE requests ADD COLUMN location TEXT DEFAULT \'\''); } catch (e) {}
-  try { await db.run('ALTER TABLE requests ADD COLUMN date_hijri TEXT DEFAULT \'\''); } catch (e) {}
-  try { await db.run("ALTER TABLE requests ADD COLUMN media_type TEXT DEFAULT 'audio'"); } catch (e) {}
-  try { await db.run("ALTER TABLE audios ADD COLUMN media_type TEXT DEFAULT 'audio'"); } catch (e) {}
 
   // Setup logging integration to write into logs table
   setDbLogWriter(async (type, message) => {

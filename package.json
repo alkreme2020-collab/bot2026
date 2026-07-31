@@ -1,7 +1,7 @@
 {
-  "name": "arabic-book-library-bot",
-  "version": "2.0.0",
-  "description": "A WhatsApp audio library bot using Node.js, Baileys, and Hugging Face Datasets.",
+  "name": "shabwa-salafi-media-bot",
+  "version": "3.0.0",
+  "description": "منصة إعلام شبوة السلفي — بوت واتساب متكامل للصوتيات والفيديوهات والكتب باستخدام Baileys و SQLite و Hugging Face.",
   "main": "src/index.js",
   "type": "module",
   "scripts": {
@@ -13,7 +13,12 @@
   "keywords": [
     "whatsapp",
     "bot",
-    "audio-library",
+    "shabwa",
+    "salafi",
+    "library",
+    "audio",
+    "video",
+    "books",
     "huggingface",
     "sqlite"
   ],

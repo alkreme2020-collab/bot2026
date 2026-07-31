@@ -17,7 +17,6 @@ export const dbService = {
     const existing = await db.get('SELECT phone FROM users WHERE phone = ?', [phone]);
     
     if (existing) {
-      // Update last seen and name (if name is provided)
       if (name) {
         await db.run(
           'UPDATE users SET name = ?, last_seen = CURRENT_TIMESTAMP WHERE phone = ?',
@@ -30,7 +29,6 @@ export const dbService = {
         );
       }
     } else {
-      // Insert new user
       await db.run(
         'INSERT INTO users (phone, name, role, joined_at, last_seen) VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
         [phone, name || 'مستخدم واتساب', role]
@@ -58,11 +56,11 @@ export const dbService = {
   },
 
   // ==========================================
-  // AUDIOS OPERATIONS
+  // AUDIOS & VIDEOS OPERATIONS
   // ==========================================
 
   /**
-   * Add a new audio to the library index.
+   * Add a new audio or video to the library index.
    * @param {object} audio
    */
   async addAudio(audio) {
@@ -76,7 +74,7 @@ export const dbService = {
       [
         audio.uuid,
         audio.title,
-        audio.presenter,
+        audio.presenter || 'غير محدد',
         audio.category,
         audio.description || '',
         audio.keywords || '',
@@ -93,7 +91,7 @@ export const dbService = {
   },
 
   /**
-   * Check if an audio already exists by SHA256 hash.
+   * Check if an audio/video already exists by SHA256 hash.
    * @param {string} sha256
    * @returns {Promise<object|undefined>}
    */
@@ -103,7 +101,7 @@ export const dbService = {
   },
 
   /**
-   * Get audio by UUID
+   * Get audio/video by UUID
    * @param {string} uuid
    * @returns {Promise<object|undefined>}
    */
@@ -118,11 +116,20 @@ export const dbService = {
    */
   async getAllAudios() {
     const db = getDb();
-    return db.all('SELECT * FROM audios ORDER BY created_at DESC');
+    return db.all("SELECT * FROM audios WHERE media_type != 'video' OR media_type IS NULL ORDER BY created_at DESC");
   },
 
   /**
-   * Delete an audio from the library.
+   * Get all videos in the database
+   * @returns {Promise<Array<object>>}
+   */
+  async getAllVideos() {
+    const db = getDb();
+    return db.all("SELECT * FROM audios WHERE media_type = 'video' ORDER BY created_at DESC");
+  },
+
+  /**
+   * Delete an audio/video from the library.
    * @param {string} uuid
    */
   async deleteAudio(uuid) {
@@ -131,7 +138,7 @@ export const dbService = {
   },
 
   /**
-   * Update details of an existing audio.
+   * Update details of an existing audio/video.
    * @param {string} uuid
    * @param {object} details
    */
@@ -162,30 +169,131 @@ export const dbService = {
   },
 
   // ==========================================
+  // BOOKS OPERATIONS
+  // ==========================================
+
+  /**
+   * Add a new book to the library.
+   * @param {object} book
+   */
+  async addBook(book) {
+    const db = getDb();
+    await db.run(
+      `INSERT INTO books (
+        uuid, title, author, category, description, keywords,
+        hf_url, cover_url, pages_count, size, sha256, downloads, uploader_phone, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      [
+        book.uuid,
+        book.title,
+        book.author || 'غير محدد',
+        book.category || 'عام',
+        book.description || '',
+        book.keywords || '',
+        book.hf_url,
+        book.cover_url || '',
+        book.pages_count || 0,
+        book.size || 0,
+        book.sha256,
+        book.uploader_phone || ''
+      ]
+    );
+  },
+
+  /**
+   * Get book by SHA256 hash.
+   * @param {string} sha256
+   * @returns {Promise<object|undefined>}
+   */
+  async getBookBySha(sha256) {
+    const db = getDb();
+    return db.get('SELECT * FROM books WHERE sha256 = ?', [sha256]);
+  },
+
+  /**
+   * Get book by UUID.
+   * @param {string} uuid
+   * @returns {Promise<object|undefined>}
+   */
+  async getBookByUuid(uuid) {
+    const db = getDb();
+    return db.get('SELECT * FROM books WHERE uuid = ?', [uuid]);
+  },
+
+  /**
+   * Get all books in database.
+   * @returns {Promise<Array<object>>}
+   */
+  async getAllBooks() {
+    const db = getDb();
+    return db.all('SELECT * FROM books ORDER BY created_at DESC');
+  },
+
+  /**
+   * Delete a book from library.
+   * @param {string} uuid
+   */
+  async deleteBook(uuid) {
+    const db = getDb();
+    await db.run('DELETE FROM books WHERE uuid = ?', [uuid]);
+  },
+
+  /**
+   * Update details of an existing book.
+   * @param {string} uuid
+   * @param {object} details
+   */
+  async updateBook(uuid, details) {
+    const db = getDb();
+    await db.run(
+      `UPDATE books SET 
+        title = COALESCE(?, title),
+        author = COALESCE(?, author),
+        category = COALESCE(?, category),
+        description = COALESCE(?, description),
+        keywords = COALESCE(?, keywords),
+        pages_count = COALESCE(?, pages_count),
+        updated_at = CURRENT_TIMESTAMP
+      WHERE uuid = ?`,
+      [
+        details.title,
+        details.author,
+        details.category,
+        details.description,
+        details.keywords,
+        details.pages_count,
+        uuid
+      ]
+    );
+  },
+
+  // ==========================================
   // REQUESTS OPERATIONS
   // ==========================================
 
   /**
-   * Create a new temporary audio request.
+   * Create a new temporary request (audio, video, or book).
    * @param {object} req
    */
   async createRequest(req) {
     const db = getDb();
     await db.run(
       `INSERT INTO requests (
-        uuid, phone, status, title, presenter, category, description, location, date_hijri, audio_temp, media_type, created_at
-      ) VALUES (?, ?, 'WAITING', ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+        uuid, phone, status, title, presenter, category, description, location, date_hijri, audio_temp, media_type, book_author, book_pages, created_at
+      ) VALUES (?, ?, 'WAITING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
       [
         req.uuid,
         req.phone,
         req.title,
-        req.presenter,
-        req.category,
+        req.presenter || '',
+        req.category || 'عام',
         req.description || '',
         req.location || '',
         req.date_hijri || '',
         req.audio_temp,
-        req.media_type || 'audio'
+        req.media_type || 'audio',
+        req.book_author || '',
+        req.book_pages || 0
       ]
     );
   },
@@ -227,67 +335,6 @@ export const dbService = {
   async getLastRequestByUser(phone) {
     const db = getDb();
     return db.get('SELECT * FROM requests WHERE phone = ? ORDER BY created_at DESC LIMIT 1', [phone]);
-  },
-
-  // ==========================================
-  // FAVORITES OPERATIONS
-  // ==========================================
-
-  /**
-   * Add an audio to user's favorites list.
-   * @param {string} phone
-   * @param {string} audioUuid
-   */
-  async addFavorite(phone, audioUuid) {
-    const db = getDb();
-    await db.run(
-      'INSERT OR IGNORE INTO favorites (user_phone, audio_uuid) VALUES (?, ?)',
-      [phone, audioUuid]
-    );
-  },
-
-  /**
-   * Remove an audio from user's favorites list.
-   * @param {string} phone
-   * @param {string} audioUuid
-   */
-  async removeFavorite(phone, audioUuid) {
-    const db = getDb();
-    await db.run(
-      'DELETE FROM favorites WHERE user_phone = ? AND audio_uuid = ?',
-      [phone, audioUuid]
-    );
-  },
-
-  /**
-   * Check if an audio is marked as favorite by a user.
-   * @param {string} phone
-   * @param {string} audioUuid
-   * @returns {Promise<boolean>}
-   */
-  async isFavorite(phone, audioUuid) {
-    const db = getDb();
-    const fav = await db.get(
-      'SELECT 1 FROM favorites WHERE user_phone = ? AND audio_uuid = ?',
-      [phone, audioUuid]
-    );
-    return !!fav;
-  },
-
-  /**
-   * Get all favorite audios of a user.
-   * @param {string} phone
-   * @returns {Promise<Array<object>>}
-   */
-  async getUserFavorites(phone) {
-    const db = getDb();
-    return db.all(
-      `SELECT a.* FROM favorites f 
-       JOIN audios a ON f.audio_uuid = a.uuid 
-       WHERE f.user_phone = ? 
-       ORDER BY a.title ASC`,
-      [phone]
-    );
   },
 
   // ==========================================
@@ -337,25 +384,25 @@ export const dbService = {
   // ==========================================
 
   /**
-   * Record an audio download event.
+   * Record a download event.
    * @param {string} phone
-   * @param {string} audioUuid
+   * @param {string} contentUuid
+   * @param {string} [contentType='audio']
    */
-  async recordDownload(phone, audioUuid) {
+  async recordDownload(phone, contentUuid, contentType = 'audio') {
     const db = getDb();
     const downloadUuid = uuidv4();
     
-    // Add record
     await db.run(
-      'INSERT INTO downloads (uuid, user_phone, audio_uuid, download_time) VALUES (?, ?, ?, CURRENT_TIMESTAMP)',
-      [downloadUuid, phone, audioUuid]
+      'INSERT INTO downloads (uuid, user_phone, audio_uuid, content_type, download_time) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)',
+      [downloadUuid, phone, contentUuid, contentType]
     );
     
-    // Increment download count in audios
-    await db.run(
-      'UPDATE audios SET downloads = downloads + 1 WHERE uuid = ?',
-      [audioUuid]
-    );
+    if (contentType === 'book') {
+      await db.run('UPDATE books SET downloads = downloads + 1 WHERE uuid = ?', [contentUuid]);
+    } else {
+      await db.run('UPDATE audios SET downloads = downloads + 1 WHERE uuid = ?', [contentUuid]);
+    }
   },
 
   // ==========================================
@@ -373,15 +420,26 @@ export const dbService = {
   },
 
   /**
-   * Add a new category.
-   * @param {string} name
-   * @returns {Promise<boolean>} - true if added, false if already exists
+   * Get categories filtered by content_type ('audio', 'video', 'book').
+   * @param {string} contentType
+   * @returns {Promise<Array<object>>}
    */
-  async addCategory(name) {
+  async getCategoriesByType(contentType) {
+    const db = getDb();
+    return db.all('SELECT * FROM categories WHERE content_type = ? ORDER BY display_order ASC', [contentType]);
+  },
+
+  /**
+   * Add a new category with content type.
+   * @param {string} name
+   * @param {string} [contentType='audio']
+   * @returns {Promise<boolean>}
+   */
+  async addCategory(name, contentType = 'audio') {
     const db = getDb();
     try {
       const maxOrder = await db.get('SELECT COALESCE(MAX(display_order), -1) + 1 as next FROM categories');
-      await db.run('INSERT INTO categories (name, display_order) VALUES (?, ?)', [name, maxOrder.next]);
+      await db.run('INSERT INTO categories (name, content_type, display_order) VALUES (?, ?, ?)', [name, contentType, maxOrder.next]);
       return true;
     } catch (e) {
       if (e.message.includes('UNIQUE')) return false;
@@ -400,6 +458,7 @@ export const dbService = {
     try {
       await db.run('UPDATE categories SET name = ? WHERE name = ?', [newName, oldName]);
       await db.run('UPDATE audios SET category = ? WHERE category = ?', [newName, oldName]);
+      await db.run('UPDATE books SET category = ? WHERE category = ?', [newName, oldName]);
       return true;
     } catch (e) {
       if (e.message.includes('UNIQUE')) return false;
@@ -408,7 +467,7 @@ export const dbService = {
   },
 
   /**
-   * Delete a category. Audios in this category are reassigned to the first available category.
+   * Delete a category.
    * @param {string} name
    * @returns {Promise<boolean>}
    */
@@ -417,6 +476,7 @@ export const dbService = {
     const fallback = await db.get("SELECT name FROM categories WHERE name != ? ORDER BY display_order ASC LIMIT 1", [name]);
     const fallbackName = fallback ? fallback.name : 'عام';
     await db.run('UPDATE audios SET category = ? WHERE category = ?', [fallbackName, name]);
+    await db.run('UPDATE books SET category = ? WHERE category = ?', [fallbackName, name]);
     await db.run('DELETE FROM categories WHERE name = ?', [name]);
     return true;
   },
@@ -431,93 +491,60 @@ export const dbService = {
    */
   async getSummaryStats() {
     const db = getDb();
-    const audios = await db.get('SELECT COUNT(*) as count FROM audios');
+    const audios = await db.get("SELECT COUNT(*) as count FROM audios WHERE media_type != 'video' OR media_type IS NULL");
+    const videos = await db.get("SELECT COUNT(*) as count FROM audios WHERE media_type = 'video'");
+    const books = await db.get('SELECT COUNT(*) as count FROM books');
     const users = await db.get('SELECT COUNT(*) as count FROM users');
     const downloads = await db.get('SELECT COUNT(*) as count FROM downloads');
     const requests = await db.get("SELECT COUNT(*) as count FROM requests WHERE status = 'WAITING'");
     
     return {
-      totalAudios: audios.count,
-      totalUsers: users.count,
-      totalDownloads: downloads.count,
-      totalRequests: requests.count
+      totalAudios: audios ? audios.count : 0,
+      totalVideos: videos ? videos.count : 0,
+      totalBooks: books ? books.count : 0,
+      totalUsers: users ? users.count : 0,
+      totalDownloads: downloads ? downloads.count : 0,
+      totalRequests: requests ? requests.count : 0
     };
   },
 
   /**
-   * Get audios ordered by downloads descending.
-   * @param {number} [limit=5]
-   * @returns {Promise<Array<object>>}
-   */
-  async getTopDownloadedAudios(limit = 5) {
-    const db = getDb();
-    return db.all('SELECT * FROM audios ORDER BY downloads DESC LIMIT ?', [limit]);
-  },
-
-  /**
-   * Get categories with counts.
-   * @returns {Promise<Array<object>>}
-   */
-  async getTopCategories() {
-    const db = getDb();
-    return db.all('SELECT category, COUNT(*) as count FROM audios GROUP BY category ORDER BY count DESC');
-  },
-
-  /**
-   * Get presenters with counts.
-   * @param {number} [limit=5]
-   * @returns {Promise<Array<object>>}
-   */
-  async getTopPresenters(limit = 5) {
-    const db = getDb();
-    return db.all('SELECT presenter, COUNT(*) as count FROM audios GROUP BY presenter ORDER BY count DESC LIMIT ?', [limit]);
-  },
-
-  /**
-   * Get number of audios added in the last 7 days.
-   * @returns {Promise<number>}
-   */
-  async getAudiosAddedThisWeek() {
-    const db = getDb();
-    const res = await db.get(
-      "SELECT COUNT(*) as count FROM audios WHERE created_at >= date('now', '-7 days')"
-    );
-    return res.count;
-  },
-
-  /**
-   * Get full audio records added in the last 7 days.
+   * Get audios added in the last 7 days.
    * @returns {Promise<Array<object>>}
    */
   async getAudiosThisWeek() {
     const db = getDb();
     return db.all(
-      "SELECT * FROM audios WHERE created_at >= datetime('now', '-7 days') ORDER BY created_at DESC"
+      "SELECT * FROM audios WHERE (media_type != 'video' OR media_type IS NULL) AND created_at >= datetime('now', '-7 days') ORDER BY created_at DESC"
     );
   },
 
   /**
-   * Get users with the most download activity.
-   * @param {number} [limit=5]
+   * Get videos added in the last 7 days.
    * @returns {Promise<Array<object>>}
    */
-  async getMostActiveUsers(limit = 5) {
+  async getVideosThisWeek() {
     const db = getDb();
     return db.all(
-      `SELECT u.phone, u.name, COUNT(d.uuid) as download_count 
-       FROM users u 
-       JOIN downloads d ON u.phone = d.user_phone 
-       GROUP BY u.phone 
-       ORDER BY download_count DESC 
-       LIMIT ?`,
-      [limit]
+      "SELECT * FROM audios WHERE media_type = 'video' AND created_at >= datetime('now', '-7 days') ORDER BY created_at DESC"
     );
   },
 
   /**
-   * Delete log entries older than the specified number of days.
+   * Get books added in the last 7 days.
+   * @returns {Promise<Array<object>>}
+   */
+  async getBooksThisWeek() {
+    const db = getDb();
+    return db.all(
+      "SELECT * FROM books WHERE created_at >= datetime('now', '-7 days') ORDER BY created_at DESC"
+    );
+  },
+
+  /**
+   * Delete log entries older than specified days.
    * @param {number} [daysToKeep=30]
-   * @returns {Promise<number>} Number of deleted rows
+   * @returns {Promise<number>}
    */
   async cleanOldLogs(daysToKeep = 30) {
     const db = getDb();
@@ -529,9 +556,9 @@ export const dbService = {
   },
 
   /**
-   * Delete download records older than the specified number of days.
+   * Delete download records older than specified days.
    * @param {number} [daysToKeep=90]
-   * @returns {Promise<number>} Number of deleted rows
+   * @returns {Promise<number>}
    */
   async cleanOldDownloads(daysToKeep = 90) {
     const db = getDb();

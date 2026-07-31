@@ -6,8 +6,8 @@ import { config } from '../config/index.js';
 import { dbService } from '../services/dbService.js';
 import { sessionService } from '../services/sessionService.js';
 import { recentPollSent } from '../services/pollTracker.js';
-import { userCommands } from '../commands/userCommands.js';
-import { adminCommands } from '../commands/adminCommands.js';
+import { userCommands } from '../commands/userCommands/index.js';
+import { adminCommands } from '../commands/adminCommands/index.js';
 import { searchService } from '../services/searchService.js';
 import logger, { dbLog } from '../utils/logger.js';
 import { msgStore } from './client.js';
@@ -27,12 +27,6 @@ function convertArabicNumerals(str) {
   return result;
 }
 
-/**
- * Extract text body or selected poll/button value from raw Baileys message object
- * @param {object} rawMsg 
- * @param {string} [meId]
- * @returns {string}
- */
 function uniqueValues(values) {
   return [...new Set(values.filter(Boolean))];
 }
@@ -62,30 +56,24 @@ function extractMessageBody(rawMsg, botUser = {}, resolvedPhone = '') {
 
   const m = rawMsg.message;
 
-  // 1. Standard Text & Media Captions
   if (m.conversation) return m.conversation.trim();
   if (m.extendedTextMessage?.text) return m.extendedTextMessage.text.trim();
   if (m.documentMessage?.caption) return m.documentMessage.caption.trim();
   if (m.imageMessage?.caption) return m.imageMessage.caption.trim();
   if (m.audioMessage?.caption) return m.audioMessage.caption?.trim() || '';
 
-  // 2. Buttons & List responses
   if (m.buttonsResponseMessage?.selectedButtonId) return m.buttonsResponseMessage.selectedButtonId.trim();
   if (m.buttonsResponseMessage?.selectedDisplayText) return m.buttonsResponseMessage.selectedDisplayText.trim();
   if (m.listResponseMessage?.singleSelectReply?.selectedRowId) return m.listResponseMessage.singleSelectReply.selectedRowId.trim();
   if (m.templateButtonReplyMessage?.selectedId) return m.templateButtonReplyMessage.selectedId.trim();
 
-  // 3. Native Flow / Interactive Response Messages
   if (m.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson) {
     try {
       const params = JSON.parse(m.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson);
       if (params.id) return String(params.id).trim();
-    } catch (e) {
-      logger.warn(`Failed to parse interactive response paramsJson: ${e.message}`);
-    }
+    } catch (e) {}
   }
 
-  // 4. Poll Vote Updates
   if (m.pollUpdateMessage) {
     const creationKey = m.pollUpdateMessage.pollCreationMessageKey;
     const pollCreation = creationKey?.id ? msgStore.get(creationKey.id) : null;
@@ -103,130 +91,71 @@ function extractMessageBody(rawMsg, botUser = {}, resolvedPhone = '') {
           : '';
         const remoteJid = rawMsg.key?.remoteJid || '';
         const phoneJid = resolvedPhone ? `${resolvedPhone}@s.whatsapp.net` : '';
-        const botIdWithDevice = botUser?.id || '';
-        const botLidWithDevice = botUser?.lid
-          ? (String(botUser.lid).includes('@') ? String(botUser.lid) : `${botUser.lid}@lid`)
-          : '';
 
         const creatorCandidates = uniqueValues([
-          botLid,
-          botId,
-          botLidWithDevice,
-          botIdWithDevice,
-          creationKey?.remoteJid,
-          getKeyAuthor(creationKey, botLid || botId || 'me')
+          botLid, botId, creationKey?.remoteJid, getKeyAuthor(creationKey, botLid || botId || 'me')
         ]);
         const voterCandidates = uniqueValues([
-          remoteJid,
-          phoneJid,
-          botLid ? transferDevice(botLid, remoteJid) : '',
-          botId ? transferDevice(botId, phoneJid || remoteJid) : '',
-          rawMsg.key?.remoteJidAlt,
-          rawMsg.key?.participant,
-          rawMsg.key?.participantAlt,
-          getKeyAuthor(rawMsg.key, botLid || botId || 'me')
+          remoteJid, phoneJid, rawMsg.key?.participant, getKeyAuthor(rawMsg.key, botLid || botId || 'me')
         ]);
 
         let voteMsg = null;
-        let lastDecryptError = null;
         for (const pollCreatorJid of creatorCandidates) {
           for (const voterJid of voterCandidates) {
             try {
-              voteMsg = decryptPollVote(
-                vote,
-                {
-                  pollEncKey: asBuffer(pollCreation.messageContextInfo.messageSecret),
-                  pollCreatorJid,
-                  pollMsgId: creationKey.id,
-                  voterJid
-                }
-              );
-              logger.info(`Poll vote decrypted using creator=${pollCreatorJid}, voter=${voterJid}`);
+              voteMsg = decryptPollVote(vote, {
+                pollEncKey: asBuffer(pollCreation.messageContextInfo.messageSecret),
+                pollCreatorJid,
+                pollMsgId: creationKey.id,
+                voterJid
+              });
               break;
-            } catch (err) {
-              lastDecryptError = err;
-            }
+            } catch (err) {}
           }
           if (voteMsg) break;
         }
 
-        if (!voteMsg) {
-          logger.warn(`Poll decrypt failed for creators=${JSON.stringify(creatorCandidates)}, voters=${JSON.stringify(voterCandidates)}, botUser=${JSON.stringify(botUser)}`);
-          throw lastDecryptError || new Error('No JID combination could decrypt poll vote');
-        }
+        if (voteMsg) {
+          const selectedHash = voteMsg.selectedOptions?.[0]?.toString();
+          const options = pollCreation.pollCreationMessage?.options ||
+            pollCreation.pollCreationMessageV2?.options ||
+            pollCreation.pollCreationMessageV3?.options || [];
 
-        const selectedHash = voteMsg.selectedOptions?.[0]?.toString();
-        const options = pollCreation.pollCreationMessage?.options ||
-          pollCreation.pollCreationMessageV2?.options ||
-          pollCreation.pollCreationMessageV3?.options ||
-          [];
-
-        for (const option of options) {
-          const optionName = option.optionName || '';
-          const optionHash = crypto.createHash('sha256').update(Buffer.from(optionName, 'utf8')).digest().toString();
-          if (selectedHash === optionHash) {
-            logger.info(`Decrypted poll vote option: "${optionName}"`);
-            return optionName.trim();
+          for (const option of options) {
+            const optionName = option.optionName || '';
+            const optionHash = crypto.createHash('sha256').update(Buffer.from(optionName, 'utf8')).digest().toString();
+            if (selectedHash === optionHash) {
+              return optionName.trim();
+            }
           }
         }
-
-        logger.warn(`Poll vote decrypted but option hash was not matched: ${selectedHash}`);
-      } catch (err) {
-        logger.warn(`Could not decrypt poll vote: ${err.message}`);
-      }
+      } catch (err) {}
     }
 
     const vote = m.pollUpdateMessage.vote || m.pollUpdateMessage.pollUpdates?.[0]?.vote;
     if (vote?.selectedOptions && vote.selectedOptions.length > 0) {
       const opt = vote.selectedOptions[0];
       let hexHash = '';
-
       if (Buffer.isBuffer(opt) || opt instanceof Uint8Array) {
         hexHash = Buffer.from(opt).toString('hex');
+      } else if (typeof opt === 'string' && opt.length === 64) {
+        hexHash = opt.toLowerCase();
       } else if (typeof opt === 'string') {
-        if (opt.length === 64) {
-          hexHash = opt.toLowerCase();
-        } else {
-          return opt.trim();
-        }
-      } else if (opt && typeof opt === 'object') {
-        if (opt.name) return opt.name.trim();
-        if (opt.optionName) return opt.optionName.trim();
-        const sub = opt.optionHash || opt.hash;
-        if (Buffer.isBuffer(sub) || sub instanceof Uint8Array) {
-          hexHash = Buffer.from(sub).toString('hex');
-        } else if (typeof sub === 'string') {
-          hexHash = sub.toLowerCase();
-        }
+        return opt.trim();
       }
 
       if (hexHash) {
-        logger.info(`Received Poll vote with option SHA256 hash: ${hexHash}`);
-
         const candidates = [
-          "🔍 البحث عن صوتية", "البحث عن صوتية",
-          "📂 التصنيفات", "التصنيفات",
-          "📋 جميع الصوتيات", "جميع الصوتيات",
-          "✨ أحدث الصوتيات", "أحدث الصوتيات",
-          "⭐ المفضلة", "المفضلة",
-          "🔔 الاشتراك", "الاشتراك",
-          "📤 إضافة صوتية", "إضافة صوتية",
-          "📊 إحصائيات المكتبة", "إحصائيات المكتبة",
-          "🆕 جديد الأسبوع", "جديد الأسبوع",
-          "➡️ التالي", "⬅️ السابق", "🔙 القائمة الرئيسية"
+          "🔍 بحث عن محتوى", "📂 التصنيفات", "🎧 جميع الصوتيات", "🎬 جميع الفيديوهات", "📚 جميع الكتب",
+          "🆕 صوتية الأسبوع", "🎬 فيديو الأسبوع", "📖 كتاب الأسبوع", "➕ إضافة محتوى", "🔔 الاشتراك",
+          "ℹ️ نبذة عن البوت", "📊 إحصائيات المكتبة", "🎧 صوتيات", "🎬 فيديوهات", "📚 كتب",
+          "⬅️ السابق", "➡️ التالي", "↩️ رجوع", "↩️ رجوع للتصنيفات", "🔙 القائمة الرئيسية",
+          "🔍 بحث جديد", "📥 تحميل رقم آخر", "➕ إضافة محتوى آخر", "❌ إلغاء"
         ];
-
-        if (config.categories) {
-          config.categories.forEach((cat, idx) => {
-            candidates.push(`${idx + 1}. ${cat}`);
-            candidates.push(cat);
-          });
-        }
 
         for (const cand of candidates) {
           const h1 = crypto.createHash('sha256').update(cand, 'utf8').digest('hex');
           if (hexHash === h1) {
-            logger.info(`Matched poll vote option: "${cand}"`);
             return cand;
           }
         }
@@ -237,12 +166,6 @@ function extractMessageBody(rawMsg, botUser = {}, resolvedPhone = '') {
   return '';
 }
 
-/**
- * Resolve a LID (Linked Identity) number to a phone number
- * by reading the Baileys auth store reverse mapping files.
- * @param {string} lidNumber - The LID number (without @lid suffix)
- * @returns {string|null} The phone number, or null if not found
- */
 function resolveLidToPhone(lidNumber) {
   try {
     const authDir = process.env.AUTH_DIR || path.join(process.cwd(), '.baileys_auth');
@@ -252,139 +175,30 @@ function resolveLidToPhone(lidNumber) {
       const data = JSON.parse(raw);
       if (data) return String(data);
     }
-  } catch (err) {
-    logger.warn(`Could not resolve LID ${lidNumber}: ${err.message}`);
-  }
+  } catch (err) {}
   return null;
 }
 
-/**
- * Check if incoming message contains an audio/document file
- * @param {object} rawMsg
- * @returns {{ hasAudio: boolean, mimetype: string, isDocument: boolean }}
- */
-function detectAudioMessage(rawMsg) {
-  const m = rawMsg.message;
-  if (!m) return { hasAudio: false, mimetype: '', isDocument: false };
-
-  // Direct audio message
-  if (m.audioMessage) {
-    return {
-      hasAudio: true,
-      mimetype: m.audioMessage.mimetype || 'audio/ogg',
-      isDocument: false,
-      filename: null
-    };
-  }
-
-  // Document that might be an audio file
-  if (m.documentMessage) {
-    const mime = (m.documentMessage.mimetype || '').toLowerCase();
-    const fname = (m.documentMessage.fileName || '').toLowerCase();
-    const audioExtensions = ['.mp3', '.m4a', '.aac', '.ogg', '.wav', '.webm', '.flac', '.opus'];
-    const audioMimes = ['audio/', 'application/octet-stream'];
-    
-    const isMimeAudio = audioMimes.some(am => mime.startsWith(am));
-    const isExtAudio = audioExtensions.some(ext => fname.endsWith(ext));
-    
-    if (mime.startsWith('audio/') || (isMimeAudio && isExtAudio)) {
-      return {
-        hasAudio: true,
-        mimetype: mime,
-        isDocument: true,
-        filename: m.documentMessage.fileName
-      };
-    }
-  }
-
-return { hasAudio: false, mimetype: '', isDocument: false, filename: null };
-}
-
-/**
- * Check if incoming message contains a video file
- * @param {object} rawMsg
- * @returns {{ hasVideo: boolean, mimetype: string }}
- */
-function detectVideoMessage(rawMsg) {
-  const m = rawMsg.message;
-  if (!m) return { hasVideo: false, mimetype: '' };
-
-  if (m.videoMessage) {
-    return { hasVideo: true, mimetype: m.videoMessage.mimetype || 'video/mp4' };
-  }
-
-  if (m.documentMessage) {
-    const mime = (m.documentMessage.mimetype || '').toLowerCase();
-    const fname = (m.documentMessage.fileName || '').toLowerCase();
-    const videoExtensions = ['.mp4', '.mkv', '.webm', '.avi', '.mov', '.m4v'];
-    const videoMimes = ['video/'];
-
-    const isMimeVideo = videoMimes.some(vm => mime.startsWith(vm));
-    const isExtVideo = videoExtensions.some(ext => fname.endsWith(ext));
-
-    if (isMimeVideo || isExtVideo) {
-      return { hasVideo: true, mimetype: mime };
-    }
-  }
-
-  return { hasVideo: false, mimetype: '' };
-}
-
-/**
- * Main message handler entry point.
- * @param {object} sock
- * @param {object} rawMsg
- */
 export async function handleMessage(sock, rawMsg) {
   const remoteJid = rawMsg.key.remoteJid;
   if (!remoteJid || remoteJid === 'status@broadcast') return;
 
-  const isLid = remoteJid.endsWith('@lid');
-  const isGroup = remoteJid.endsWith('@g.us');
   let phone = remoteJid.split('@')[0];
-  
-  // Resolve LID to actual phone number if possible
-  if (isLid) {
+  if (remoteJid.endsWith('@lid')) {
     const resolved = resolveLidToPhone(phone);
-    if (resolved) {
-      logger.info(`Resolved LID ${phone} -> phone ${resolved}`);
-      phone = resolved;
-    }
-  }
-  
-  // Handle group messages – only respond when bot is @mentioned
-  if (isGroup) {
-    const botJid = sock.user?.id ? jidNormalizedUser(sock.user.id) : '';
-    const mentioned = rawMsg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-    const isMentioned = botJid && mentioned.some(j => jidNormalizedUser(j) === botJid);
-
-    if (!isMentioned) return;
-
-    // Use the participant's phone for session tracking
-    const participant = rawMsg.key.participant || rawMsg.key.remoteJid;
-    phone = participant.split('@')[0];
-
-    // Resolve LID for group participant
-    if (participant.endsWith('@lid')) {
-      const resolved = resolveLidToPhone(phone);
-      if (resolved) phone = resolved;
-    }
+    if (resolved) phone = resolved;
   }
 
-  // Ignore old messages (older than 60 seconds) to prevent startup spam loops
   const msgTimestamp = Number(rawMsg.messageTimestamp) || 0;
   const currentTimestamp = Math.floor(Date.now() / 1000);
-  if (msgTimestamp > 0 && currentTimestamp - msgTimestamp > 60) {
-    return;
-  }
+  if (msgTimestamp > 0 && currentTimestamp - msgTimestamp > 60) return;
 
   if (!rawMsg.isPollSelection && sessionService.isRateLimited(phone)) {
     const now = Date.now();
     const lastWarn = lastWarningTimes.get(phone) || 0;
-    
     if (now - lastWarn > 5000) {
       lastWarningTimes.set(phone, now);
-      await sock.sendMessage(remoteJid, { text: '⚠️ الرجاء إرسال الرسائل ببطء لتجنب الحظر.' }, { quoted: rawMsg });
+      await sock.sendMessage(remoteJid, { text: '⚠️ الرجاء إرسال الرسائل ببطء.' }, { quoted: rawMsg });
     }
     return;
   }
@@ -392,214 +206,166 @@ export async function handleMessage(sock, rawMsg) {
   try {
     const name = rawMsg.pushName || 'مستخدم واتساب';
     const isAdmin = phone === config.adminNumber;
-    const role = isAdmin ? 'admin' : 'user';
-
-    await dbService.upsertUser(phone, name, role);
-
-    if (rawMsg.message) {
-      logger.info(`Message keys from ${phone}: ${Object.keys(rawMsg.message).join(', ')}`);
-      if (rawMsg.message.pollUpdateMessage) {
-        logger.info(`Raw pollUpdateMessage: ${JSON.stringify(rawMsg.message.pollUpdateMessage)}`);
-      }
-    }
+    await dbService.upsertUser(phone, name, isAdmin ? 'admin' : 'user');
 
     let body = extractMessageBody(rawMsg, sock.user || {}, phone);
-    // Strip markdown backticks that users might accidentally copy-paste from bot responses
     body = body.replace(/`/g, '').trim();
-    // Convert Arabic numerals to standard English numbers
     body = convertArabicNumerals(body);
 
-    // Skip echo suppression for poll votes — they are genuine user selections, not echoes
     const isPollVote = rawMsg.isPollSelection || rawMsg.message?.pollUpdateMessage;
     if (suppressPollEcho(phone, body, isPollVote)) return;
 
-    // Map Poll option selections to standard command terms
+    // Poll options mapping
     const pollMap = {
-      '🔍 البحث عن صوتية': 'بحث',
-      'البحث عن صوتية': 'بحث',
+      '🔍 بحث عن محتوى': 'بحث',
       '📂 التصنيفات': 'تصنيفات',
-      'التصنيفات': 'تصنيفات',
-      '📋 جميع الصوتيات': 'جميع',
-      'جميع الصوتيات': 'جميع',
-      '✨ أحدث الصوتيات': 'جديد',
-      'أحدث الصوتيات': 'جديد',
-      '🆕 جديد الأسبوع': 'جديد الاسبوع',
-      'جديد الأسبوع': 'جديد الاسبوع',
-      '⭐ المفضلة': 'مفضلة',
-      'المفضلة': 'مفضلة',
+      '🎧 جميع الصوتيات': 'جميع_صوتيات',
+      '🎬 جميع الفيديوهات': 'جميع_فيديوهات',
+      '📚 جميع الكتب': 'جميع_كتب',
+      '🆕 صوتية الأسبوع': 'صوتية_الاسبوع',
+      '🎬 فيديو الأسبوع': 'فيديو_الاسبوع',
+      '📖 كتاب الأسبوع': 'كتاب_الاسبوع',
+      '➕ إضافة محتوى': 'اضافة',
       '🔔 الاشتراك': 'اشتراك',
-      'الاشتراك': 'اشتراك',
-      '📤 إضافة صوتية': 'اضافة',
-      'إضافة صوتية': 'اضافة',
+      'ℹ️ نبذة عن البوت': 'نبذة',
       '📊 إحصائيات المكتبة': 'احصائيات',
-      'إحصائيات المكتبة': 'احصائيات',
-      '➡️ التالي': 'التالي',
-      '⬅️ السابق': 'السابق',
+      '🎧 صوتيات': 'نوع_صوتيات',
+      '🎬 فيديوهات': 'نوع_فيديوهات',
+      '📚 كتب': 'نوع_كتب',
+      '↩️ رجوع': 'رجوع',
+      '↩️ رجوع للتصنيفات': 'رجوع',
       '🔙 القائمة الرئيسية': 'قائمة',
-      '🔙 العودة للقائمة الرئيسية': 'قائمة',
-      '🔍 إجراء بحث جديد': 'بحث',
-      '⭐ إضافة للمفضلة': 'مفضلة_اخر_صوتية'
+      '🔍 بحث جديد': 'بحث_جديد',
+      '📥 تحميل رقم آخر': 'تحميل_رقم_اخر',
+      '➕ إضافة محتوى آخر': 'اضافة',
+      '❌ إلغاء': 'إلغاء'
     };
 
-    if (pollMap[body]) {
-      body = pollMap[body];
-    }
-    
-    // Create a polyfill for msg to make commands compatible
-    const audioInfo = detectAudioMessage(rawMsg);
-    const videoInfo = detectVideoMessage(rawMsg);
+    if (pollMap[body]) body = pollMap[body];
+
     const msg = {
       from: phone,
-      remoteJid: remoteJid,
-      body: body,
+      remoteJid,
+      body,
       pushname: name,
-      hasMedia: audioInfo.hasAudio || videoInfo.hasVideo || !!(rawMsg.message?.documentMessage || rawMsg.message?.imageMessage),
-      hasAudio: audioInfo.hasAudio,
-      hasVideo: videoInfo.hasVideo,
-      mimetype: audioInfo.mimetype || videoInfo.mimetype || rawMsg.message?.documentMessage?.mimetype || rawMsg.message?.imageMessage?.mimetype,
-      type: rawMsg.message?.audioMessage ? 'audio'
-          : rawMsg.message?.videoMessage ? 'video'
-          : rawMsg.message?.documentMessage ? 'document'
-          : rawMsg.message?.imageMessage ? 'image'
-          : 'chat',
-      reply: async (text) => await sock.sendMessage(remoteJid, { text }, { quoted: rawMsg }),
       raw: rawMsg,
-      isPollSelection: !!(rawMsg.isPollSelection || (rawMsg.message && rawMsg.message.pollUpdateMessage))
+      reply: async (text) => await sock.sendMessage(remoteJid, { text }, { quoted: rawMsg })
     };
 
     const session = sessionService.getSession(phone);
-
-    if (body) {
-      await dbLog('MESSAGE_RECV', `From: ${phone} (${name}) | Text: "${body}"`);
-    }
-
     const cleanBody = body.toLowerCase().trim();
-    if (['/start', 'ابدأ', 'البداية', 'القائمة', 'قائمة', 'الرئيسية', 'رجوع', 'عودة'].includes(cleanBody)) {
+
+    // Global Shortcuts
+    if (['/start', 'ابدأ', 'البداية', 'القائمة', 'قائمة', 'الرئيسية'].includes(cleanBody)) {
       sessionService.clearSession(phone);
       return await userCommands.handleStart(sock, msg);
     }
 
-    if (body === 'مفضلة_اخر_صوتية') {
-      const lastUuid = session.data.lastDownloadedUuid;
-      if (lastUuid) {
-        return await userCommands.addToFavorites(sock, msg, lastUuid);
-      } else {
-        return await msg.reply('❌ لم يتم العثور على آخر صوتية قمت بتحميلها.');
+    if (['إلغاء', 'الغاء', 'cancel'].includes(cleanBody)) {
+      sessionService.clearSession(phone);
+      await msg.reply('✅ تم إلغاء العملية والعودة للقائمة الرئيسية.');
+      return await userCommands.handleStart(sock, msg);
+    }
+
+    // Smart Back Handler
+    if (cleanBody === 'رجوع') {
+      if (!session || !session.data?.backTo) {
+        sessionService.clearSession(phone);
+        return await userCommands.handleStart(sock, msg);
       }
+
+      const backTo = session.data.backTo;
+      if (backTo === 'SELECTING_CONTENT_TYPE') {
+        return await userCommands.promptContentType(sock, msg, session.data.context || 'browse');
+      }
+      if (backTo === 'SELECTING_CATEGORY') {
+        return await userCommands.displayCategoriesForType(sock, msg, session.data.contentType || 'audio', session.data.context || 'browse');
+      }
+      if (backTo === 'AWAITING_SEARCH') {
+        return await userCommands.promptSearchInput(sock, msg, session.data.contentType || 'audio', session.data.categoryName);
+      }
+      
+      sessionService.clearSession(phone);
+      return await userCommands.handleStart(sock, msg);
     }
 
-    // Handle incoming media files (audio/video)
-    const currentSession = sessionService.getSession(phone);
-    if (msg.hasAudio && currentSession.state === 'AWAITING_AUDIO_UPLOAD') {
-      logger.info(`Received audio file from user ${phone}. Processing upload.`);
-      await userCommands.handleAudioUpload(sock, msg);
-      return;
-    }
-    if (msg.hasVideo && currentSession.state === 'AWAITING_VIDEO_UPLOAD') {
-      logger.info(`Received video file from user ${phone}. Processing upload.`);
-      await userCommands.handleVideoUpload(sock, msg);
-      return;
-    }
-    if (msg.hasAudio || msg.hasVideo) {
-      logger.info(`Received unsolicited media from user ${phone}. Suggesting upload flow.`);
-      const typeName = msg.hasVideo ? 'فيديو' : 'صوتي';
-      await msg.reply(`📥 استلمنا ملفك ${typeName}!\n\nإذا كنت تريد إضافته للمكتبة، أرسل كلمة *اضافة* أولاً ثم أرسل الملف.`);
-      return;
-    }
-
+    // Active State Routing
     if (session.state !== 'IDLE') {
-      logger.info(`Routing message for ${phone} within active state: ${session.state}`);
       switch (session.state) {
-        case 'AWAITING_SEARCH':
-          await userCommands.executeSearch(sock, msg, body);
-          return;
-        case 'SEARCH_RESULTS': {
-          const lastAudios = session.data.lastAudios || [];
-          if (lastAudios.length === 0) {
-            sessionService.clearSession(msg.from);
-            break; // Let it fall through to normal command processing
-          }
-          
-          let targetUuid = null;
-          if (body === 'تحميل') {
-            targetUuid = lastAudios[0].uuid; // Default to first audio
-          } else if (body.startsWith('تحميل ')) {
-            const num = parseInt(body.substring(5).trim(), 10);
-            if (!isNaN(num) && num > 0 && num <= lastAudios.length) {
-              targetUuid = lastAudios[num - 1].uuid;
-            }
-          } else {
-            const num = parseInt(body, 10);
-            if (!isNaN(num) && num > 0 && num <= lastAudios.length) {
-              targetUuid = lastAudios[num - 1].uuid;
-            }
-          }
+        case 'SELECTING_CONTENT_TYPE': {
+          const ctx = session.data?.context || 'search';
+          let cType = 'audio';
+          if (body === 'نوع_فيديوهات' || body.includes('فيديو')) cType = 'video';
+          else if (body === 'نوع_كتب' || body.includes('كتب')) cType = 'book';
 
-          if (targetUuid) {
-            return await userCommands.downloadAudio(sock, msg, targetUuid);
-          }
-          
-          // If the message wasn't a valid download command for search results,
-          // we don't return here so it can fall through to global commands
+          if (ctx === 'search') return await userCommands.displayCategoriesForType(sock, msg, cType, 'search');
+          if (ctx === 'browse') return await userCommands.displayCategoriesForType(sock, msg, cType, 'browse');
+          if (ctx === 'add') return await userCommands.handleAddMediaTypeSelection(sock, msg, body);
           break;
         }
-        case 'AWAITING_CATEGORY_BROWSE':
-          await userCommands.browseCategory(sock, msg, body);
-          return;
-        case 'BROWSE_ALL':
-          await userCommands.handleBrowseAll(sock, msg, body);
-          return;
-        case 'AWAITING_MEDIA_TYPE':
-          await userCommands.handleMediaTypeSelection(sock, msg, body);
-          return;
-        case 'AWAITING_AUDIO_UPLOAD':
-          await msg.reply('❌ يرجى إرفاق الملف الصوتي الآن. لإلغاء العملية أرسل "القائمة".');
-          return;
-        case 'AWAITING_VIDEO_UPLOAD':
-          await msg.reply('❌ يرجى إرفاق ملف الفيديو الآن. لإلغاء العملية أرسل "القائمة".');
-          return;
-        case 'AWAITING_ADD_TITLE':
-          await userCommands.handleAddTitle(sock, msg, session);
-          return;
-        case 'AWAITING_ADD_AUTHOR':
-          await userCommands.handleAddAuthor(sock, msg, session);
-          return;
-        case 'AWAITING_ADD_CATEGORY':
-          await userCommands.handleAddCategory(sock, msg, session);
-          return;
-        case 'AWAITING_ADD_LOCATION':
-          await userCommands.handleAddLocation(sock, msg, session);
-          return;
-        case 'AWAITING_ADD_DATE':
-          await userCommands.handleAddDate(sock, msg, session);
-          return;
-        case 'AWAITING_ADD_DESC':
-          await userCommands.handleAddDescription(sock, msg, session);
-          return;
-        case 'AWAITING_DELETE_CONFIRM': {
-          if (body === 'إلغاء') {
-            sessionService.clearSession(msg.from);
-            await msg.reply('✅ تم إلغاء الحذف.');
-            return;
+
+        case 'SELECTING_CATEGORY': {
+          const cType = session.data?.contentType || 'audio';
+          const ctx = session.data?.context || 'browse';
+
+          if (body.includes('بحث في كل')) {
+            return await userCommands.promptSearchInput(sock, msg, cType, null);
           }
+
+          let catName = body.replace(/^📋\s*/, '').trim();
+          if (catName) {
+            if (ctx === 'search') {
+              return await userCommands.promptSearchInput(sock, msg, cType, catName);
+            }
+            return await userCommands.listContent(sock, msg, cType, catName, 0);
+          }
+          break;
+        }
+
+        case 'AWAITING_SEARCH':
+          return await userCommands.executeSearch(sock, msg, body, session.data?.contentType || 'audio', session.data?.categoryName);
+
+        case 'CONTENT_LIST':
+          return await userCommands.handleContentListInput(sock, msg, body);
+
+        case 'AWAITING_UPLOAD_FILE':
+          return await userCommands.handleFileUpload(sock, msg);
+
+        case 'AWAITING_ADD_TITLE':
+          return await userCommands.handleAddTitle(sock, msg);
+
+        case 'AWAITING_ADD_AUTHOR':
+          return await userCommands.handleAddAuthor(sock, msg);
+
+        case 'AWAITING_ADD_CATEGORY': {
+          const catName = body.replace(/^📋\s*/, '').trim();
+          return await userCommands.handleAddCategorySelect(sock, msg, catName);
+        }
+
+        case 'AWAITING_ADD_DESC':
+          return await userCommands.handleAddDescription(sock, msg);
+
+        case 'AWAITING_DELETE_CONFIRM': {
           if (body.startsWith('تأكيد حذف ')) {
             const uuid = body.substring(9).trim();
-            sessionService.clearSession(msg.from);
+            sessionService.clearSession(phone);
             return await adminCommands.confirmDelete(sock, msg, uuid);
           }
-          await msg.reply('❌ أرسل `تأكيد حذف [الـ UUID]` للحذف أو `إلغاء` للإلغاء.');
-          return;
+          break;
         }
+
         case 'AWAITING_REJECT_REASON': {
-          const rejectReqId = session.data.rejectRequestId;
-          const reason = body === 'تخطي' ? 'غير محدد' : body;
-          sessionService.clearSession(msg.from);
-          return await adminCommands.rejectRequest(sock, msg, rejectReqId, reason);
+          const reqId = session.data?.rejectRequestId;
+          sessionService.clearSession(phone);
+          return await adminCommands.rejectRequest(sock, msg, reqId, body);
         }
       }
     }
 
+    // Admin Commands
     if (isAdmin) {
+      if (['أوامر', 'الاوامر', 'الديد', 'help', 'admin'].includes(cleanBody)) return await adminCommands.showAdminHelp(sock, msg);
+      if (body === 'تصنيفات الأدمن' || body === 'تصنيفات الادمن') return await adminCommands.listAdminCategories(sock, msg);
       if (body === 'طلبات') return await adminCommands.listRequests(sock, msg);
       if (body === 'قبول' || body.startsWith('قبول ')) return await adminCommands.approveRequest(sock, msg, body.substring(4).trim());
       if (body === 'رفض' || body.startsWith('رفض ')) {
@@ -610,51 +376,42 @@ export async function handleMessage(sock, rawMsg) {
         return await adminCommands.rejectRequest(sock, msg, reqId, reason);
       }
       if (body.startsWith('حذف ')) return await adminCommands.deleteAudio(sock, msg, body.substring(4).trim());
-      if (body.startsWith('تعديل ')) return await adminCommands.editAudio(sock, msg, body.substring(6).trim());
-      if (body === 'إحصائيات' || body === 'احصائيات الإدارة') return await adminCommands.displayAdminStats(sock, msg);
+      if (body === 'إحصائيات' || body === 'تقرير') return await adminCommands.displayAdminStats(sock, msg);
       if (body.startsWith('رسالة جماعية ')) return await adminCommands.broadcastMessage(sock, msg, body.substring(13).trim());
       if (body === 'نسخة احتياطية' || body === 'نسخة') return await adminCommands.sendBackup(sock, msg);
-      if (body === 'إعادة بناء الفهرس' || body === 'تحديث الفهرس') return await adminCommands.rebuildCache(sock, msg);
-      if (body === 'تنظيف الملفات المؤقتة' || body === 'تنظيف') return await adminCommands.cleanTempFiles(sock, msg);
-      if (body === 'إعادة مزامنة Hugging Face' || body === 'مزامنة') return await adminCommands.resyncHf(sock, msg);
+      if (body === 'تحديث الفهرس') return await adminCommands.rebuildCache(sock, msg);
+      if (body === 'تنظيف المؤقت') return await adminCommands.cleanTempFiles(sock, msg);
       if (body.startsWith('إضافة تصنيف ')) return await adminCommands.addCategory(sock, msg, body.substring(12).trim());
-      if (body.startsWith('تعديل تصنيف ')) return await adminCommands.renameCategory(sock, msg, body.substring(12).trim());
       if (body.startsWith('حذف تصنيف ')) return await adminCommands.removeCategory(sock, msg, body.substring(10).trim());
     }
 
-    if (['بحث', 'البحث', 'ابحث', 'بحوث', 'تفتيش', 'search'].includes(cleanBody)) return await userCommands.promptSearch(sock, msg);
-    if (['تصنيفات', 'التصنيفات', 'الاقسام', 'الأقسام', 'أقسام', 'اقسام', 'الفئات'].includes(cleanBody)) return await userCommands.displayCategories(sock, msg);
-    if (['جميع', 'جميع الصوتيات', 'كل الصوتيات', 'الكل', 'الصوتيات', 'مكتبة'].includes(cleanBody)) return await userCommands.displayAllAudios(sock, msg);
-    if (['جديد', 'أحدث الصوتيات', 'احدث الصوتيات', 'احدث', 'أحدث', 'جديدة', 'الجديد'].includes(cleanBody)) return await userCommands.displayRecentAudios(sock, msg);
-    if (['جديد الاسبوع', 'جديد الأسبوع', 'new this week', 'الاسبوع'].includes(cleanBody)) return await userCommands.displayNewThisWeek(sock, msg);
-    if (['احصائيات', 'إحصائيات المكتبة', 'احصائيات المكتبة', 'احصائية', 'إحصائيات', 'الاحصائيات'].includes(cleanBody)) return await userCommands.displayLibraryStats(sock, msg);
-    if (['مفضلة', 'المفضلة', 'مفضلتي', 'مفضلات', 'fav', 'favorites'].includes(cleanBody)) return await userCommands.displayFavorites(sock, msg);
-    if (['اشتراك', 'الاشتراك', 'اشترك', 'تنبيهات', 'اشعارات', 'إشعارات'].includes(cleanBody)) return await userCommands.handleSubscribe(sock, msg);
-    if (['اضافة', 'إضافة صوتية', 'اضافة صوتية', 'رفع', 'إضافة', 'اضف'].includes(cleanBody)) return await userCommands.promptAudioUpload(sock, msg);
-    if (body.startsWith('تحميل ')) return await userCommands.downloadAudio(sock, msg, body.substring(6).trim());
-    if (body.startsWith('مفضلة ')) return await userCommands.addToFavorites(sock, msg, body.substring(6).trim());
-    if (body.startsWith('حذف_مفضلة ')) return await userCommands.removeFromFavorites(sock, msg, body.substring(10).trim());
+    // User Commands
+    if (body === 'بحث') return await userCommands.promptContentType(sock, msg, 'search');
+    if (body === 'تصنيفات') return await userCommands.promptContentType(sock, msg, 'browse');
+    if (body === 'جميع_صوتيات') return await userCommands.listContent(sock, msg, 'audio', null, 0);
+    if (body === 'جميع_فيديوهات') return await userCommands.listContent(sock, msg, 'video', null, 0);
+    if (body === 'جميع_كتب') return await userCommands.listContent(sock, msg, 'book', null, 0);
+    if (body === 'صوتية_الاسبوع') return await userCommands.displayNewThisWeek(sock, msg, 'audio');
+    if (body === 'فيديو_الاسبوع') return await userCommands.displayNewThisWeek(sock, msg, 'video');
+    if (body === 'كتاب_الاسبوع') return await userCommands.displayNewThisWeek(sock, msg, 'book');
+    if (body === 'اضافة') return await userCommands.promptAddContent(sock, msg);
+    if (body === 'اشتراك') return await userCommands.handleSubscribe(sock, msg);
+    if (body === 'نبذة') return await userCommands.displayAbout(sock, msg);
+    if (body === 'احصائيات') return await userCommands.displayLibraryStats(sock, msg);
 
-    if (!body || body.trim().length === 0) {
-      return;
-    }
+    if (!body || body.trim().length === 0) return;
 
-    // Unrecognized message - show main menu with identifying text
+    // Default Fallback
     return await userCommands.handleStart(sock, msg);
 
   } catch (err) {
     logger.error(`Error in message routing for ${phone}: ${err.stack}`);
-    await sock.sendMessage(rawMsg.key.remoteJid, { text: '❌ حدث خطأ داخلي أثناء معالجة رسالتك. يرجى المحاولة لاحقاً.' }).catch(() => {});
   }
 }
 
-/**
- * Clean up stale entries from in-memory Maps to prevent memory leaks.
- * Called periodically from index.js.
- */
 export function cleanupHandlerMaps() {
   const now = Date.now();
-  const MAX_AGE_MS = 10 * 60 * 1000; // 10 minutes
+  const MAX_AGE_MS = 10 * 60 * 1000;
   for (const [phone, time] of lastWarningTimes.entries()) {
     if (now - time > MAX_AGE_MS) {
       lastWarningTimes.delete(phone);
