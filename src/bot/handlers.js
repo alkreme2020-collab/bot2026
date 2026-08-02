@@ -317,6 +317,9 @@ export async function handleMessage(sock, rawMsg) {
             if (ctx === 'search') {
               return await userCommands.promptSearchInput(sock, msg, cType, catName);
             }
+            if (ctx === 'add') {
+              return await userCommands.handleAddCategorySelect(sock, msg, catName);
+            }
             return await userCommands.listContent(sock, msg, cType, catName, 0);
           }
           break;
