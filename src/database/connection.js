@@ -118,6 +118,14 @@ export async function initDatabase() {
       display_order INTEGER DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS advertisements (
+      uuid TEXT PRIMARY KEY,
+      text TEXT NOT NULL,
+      image_url TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      expires_at DATETIME NOT NULL
+    );
   `);
 
   // Add new columns for existing databases (safe to run even if columns exist)

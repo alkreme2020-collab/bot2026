@@ -11,6 +11,7 @@ import logger, { dbLog } from '../../utils/logger.js';
 import { formatBytes, userCommands } from '../userCommands/index.js';
 import { phoneToJid } from '../../utils/jidHelper.js';
 import { hfSessionSync } from '../../services/hfSessionSync.js';
+import { downloadMediaMessage } from '@whiskeysockets/baileys';
 
 /**
  * Helper to compute SHA256 checksum of a file.
@@ -610,6 +611,85 @@ export const adminCommands = {
     } catch (err) {
       logger.error(`Error cleaning temp files: ${err.message}`);
       await msg.reply('❌ فشل تنظيف الملفات المؤقتة.');
+    }
+  },
+
+  /**
+   * Add Advertisement (Syntax: إضافة إعلان [عدد_الأيام] [النص])
+   */
+  async addAdvertisement(client, msg, text) {
+    if (!text || text.trim() === '') {
+      await msg.reply('❌ الصيغة: `إضافة إعلان [عدد_الأيام] [نص الإعلان]`\nيمكنك أيضاً إرفاق صورة مع هذا الأمر في الوصف.');
+      return;
+    }
+
+    const parts = text.trim().split(' ');
+    const days = parseInt(parts[0], 10);
+    
+    if (isNaN(days) || days <= 0) {
+      await msg.reply('❌ يرجى تحديد عدد الأيام برقم صحيح. مثال: `إضافة إعلان 3 إعلان جديد`');
+      return;
+    }
+
+    const adText = parts.slice(1).join(' ').trim();
+    if (!adText) {
+      await msg.reply('❌ يرجى كتابة نص الإعلان.');
+      return;
+    }
+
+    let imageUrl = null;
+    let tempPath = null;
+
+    try {
+      await msg.reply('⏳ جاري إضافة الإعلان...');
+
+      const isImage = msg.raw.message?.imageMessage || msg.raw.message?.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage;
+      if (isImage) {
+        const buffer = await downloadMediaMessage(msg.raw, 'buffer', {}, { logger });
+        if (buffer) {
+          tempPath = path.join(config.rootDir, 'temp', `ad_${uuidv4()}.jpg`);
+          fs.writeFileSync(tempPath, buffer);
+          
+          const hfPath = `ads/ad_${uuidv4()}.jpg`;
+          imageUrl = await hfService.uploadFile(tempPath, hfPath);
+        }
+      }
+
+      await dbService.addAdvertisement(adText, imageUrl, days);
+
+      await msg.reply(`✅ تم إضافة الإعلان بنجاح لمدة ${days} أيام.`);
+      await dbLog('AD_ADDED', `Admin added ad for ${days} days: ${adText}`);
+
+      const subscribers = await dbService.getAllSubscribers();
+      if (subscribers.length > 0) {
+        let successCount = 0;
+        for (const phone of subscribers) {
+          try {
+            if (phone === config.adminNumber) continue;
+            if (imageUrl) {
+              await client.sendMessage(phoneToJid(phone), {
+                image: { url: imageUrl },
+                caption: `📢 *إعلان جديد:*\n\n${adText}`
+              });
+            } else {
+              await client.sendMessage(phoneToJid(phone), {
+                text: `📢 *إعلان جديد:*\n\n${adText}`
+              });
+            }
+            successCount++;
+            await new Promise(r => setTimeout(r, 2000));
+          } catch (e) {}
+        }
+        await msg.reply(`✅ تم إرسال الإشعار لـ ${successCount} مشترك.`);
+      }
+
+    } catch (err) {
+      logger.error(`Error adding advertisement: ${err.message}`);
+      await msg.reply('❌ حدث خطأ أثناء إضافة الإعلان.');
+    } finally {
+      if (tempPath && fs.existsSync(tempPath)) {
+        fs.unlinkSync(tempPath);
+      }
     }
   }
 };

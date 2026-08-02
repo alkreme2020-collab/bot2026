@@ -148,7 +148,7 @@ function extractMessageBody(rawMsg, botUser = {}, resolvedPhone = '') {
         const candidates = [
           "🔍 بحث عن محتوى", "📂 التصنيفات", "🎧 جميع الصوتيات", "🎬 جميع الفيديوهات", "📚 جميع الكتب",
           "🆕 صوتية الأسبوع", "🎬 فيديو الأسبوع", "📖 كتاب الأسبوع", "➕ إضافة محتوى", "🔔 الاشتراك",
-          "ℹ️ نبذة عن البوت", "📊 إحصائيات المكتبة", "🎧 صوتيات", "🎬 فيديوهات", "📚 كتب",
+          "📢 الإعلانات", "📊 إحصائيات المكتبة", "🎧 صوتيات", "🎬 فيديوهات", "📚 كتب",
           "⬅️ السابق", "➡️ التالي", "↩️ رجوع", "↩️ رجوع للتصنيفات", "🔙 القائمة الرئيسية",
           "🔍 بحث جديد", "📥 تحميل رقم آخر", "➕ إضافة محتوى آخر", "❌ إلغاء"
         ];
@@ -227,7 +227,7 @@ export async function handleMessage(sock, rawMsg) {
       '📖 كتاب الأسبوع': 'كتاب_الاسبوع',
       '➕ إضافة محتوى': 'اضافة',
       '🔔 الاشتراك': 'اشتراك',
-      'ℹ️ نبذة عن البوت': 'نبذة',
+      '📢 الإعلانات': 'إعلانات',
       '📊 إحصائيات المكتبة': 'احصائيات',
       '🎧 صوتيات': 'نوع_صوتيات',
       '🎬 فيديوهات': 'نوع_فيديوهات',
@@ -383,6 +383,7 @@ export async function handleMessage(sock, rawMsg) {
       if (body === 'تنظيف المؤقت') return await adminCommands.cleanTempFiles(sock, msg);
       if (body.startsWith('إضافة تصنيف ')) return await adminCommands.addCategory(sock, msg, body.substring(12).trim());
       if (body.startsWith('حذف تصنيف ')) return await adminCommands.removeCategory(sock, msg, body.substring(10).trim());
+      if (body.startsWith('إضافة إعلان ')) return await adminCommands.addAdvertisement(sock, msg, body.substring(12).trim());
     }
 
     // User Commands
@@ -396,7 +397,7 @@ export async function handleMessage(sock, rawMsg) {
     if (body === 'كتاب_الاسبوع') return await userCommands.displayNewThisWeek(sock, msg, 'book');
     if (body === 'اضافة') return await userCommands.promptAddContent(sock, msg);
     if (body === 'اشتراك') return await userCommands.handleSubscribe(sock, msg);
-    if (body === 'نبذة') return await userCommands.displayAbout(sock, msg);
+    if (body === 'إعلانات') return await userCommands.displayAdvertisements(sock, msg);
     if (body === 'احصائيات') return await userCommands.displayLibraryStats(sock, msg);
 
     if (!body || body.trim().length === 0) return;

@@ -523,30 +523,37 @@ ${contentType === 'book' ? `✍️ *المؤلف:* ${item.author || 'غير مح
   },
 
   /**
-   * Display About Bot Info
+   * Display Advertisements
    */
-  async displayAbout(client, msg) {
-    const text = `ℹ️ *نبذة عن منصة إعلام شبوة السلفي:*
-━━━━━━━━━━━━━━━━━━
-
-🤖 منصة رقمية سلفية شاملة تهدف إلى نشر العلم الشرعي المأصول للمكتبة السلفية بشبوة.
-
-📦 *المحتوى المتاح:*
-🎧 *صوتيات:* خطب، محاضرات، ودورات علمية.
-🎬 *فيديوهات:* مقتطفات ومواد مفرغة.
-📚 *كتب:* مؤلفات ورسائل علمية.
-
-نسأل الله أن ينفع بها الجميع. ❤️`;
-
-    await msg.reply(text);
-
-    const pollValues = buildNavPoll({});
+  async displayAdvertisements(client, msg) {
+    client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
     try {
+      const ads = await dbService.getActiveAdvertisements();
+      if (ads.length === 0) {
+        await msg.reply('📭 لا توجد إعلانات حالياً.');
+      } else {
+        await msg.reply('📢 *الإعلانات الحالية:*\n━━━━━━━━━━━━━━━━━━');
+        for (const ad of ads) {
+          if (ad.image_url) {
+            await client.sendMessage(msg.remoteJid, {
+              image: { url: ad.image_url },
+              caption: ad.text
+            });
+          } else {
+            await client.sendMessage(msg.remoteJid, { text: ad.text });
+          }
+        }
+      }
+
+      const pollValues = buildNavPoll({});
       const sentMsg = await client.sendMessage(msg.remoteJid, {
         poll: { name: '📌 القائمة الرئيسية:', values: pollValues, selectableCount: 1 }
       });
       if (sentMsg?.key?.id && sentMsg.message) msgStore.set(sentMsg.key.id, sentMsg.message);
-    } catch (e) {}
+    } catch (err) {
+      logger.error(`Error displaying ads: ${err.message}`);
+      await msg.reply('❌ حدث خطأ أثناء جلب الإعلانات.');
+    }
   },
 
   /**

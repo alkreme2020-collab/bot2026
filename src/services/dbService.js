@@ -567,5 +567,37 @@ export const dbService = {
       [daysToKeep]
     );
     return result.changes || 0;
+  },
+
+  // ==========================================
+  // ADVERTISEMENTS OPERATIONS
+  // ==========================================
+
+  /**
+   * Add a new advertisement.
+   * @param {string} text
+   * @param {string} imageUrl
+   * @param {number} days
+   * @returns {Promise<string>}
+   */
+  async addAdvertisement(text, imageUrl, days) {
+    const db = getDb();
+    const adUuid = uuidv4();
+    await db.run(
+      `INSERT INTO advertisements (uuid, text, image_url, expires_at)
+       VALUES (?, ?, ?, datetime('now', '+' || ? || ' days'))`,
+      [adUuid, text, imageUrl || null, days]
+    );
+    return adUuid;
+  },
+
+  /**
+   * Get active advertisements and auto-delete expired ones.
+   * @returns {Promise<Array<object>>}
+   */
+  async getActiveAdvertisements() {
+    const db = getDb();
+    await db.run("DELETE FROM advertisements WHERE expires_at < datetime('now')");
+    return db.all("SELECT * FROM advertisements WHERE expires_at >= datetime('now') ORDER BY created_at DESC");
   }
 };
