@@ -11,6 +11,7 @@ import { recentPollSent } from '../../services/pollTracker.js';
 import logger, { dbLog } from '../../utils/logger.js';
 import { phoneToJid } from '../../utils/jidHelper.js';
 import { msgStore } from '../../bot/client.js';
+import { downloadMedia, getMediaMessageInfo } from '../../utils/mediaHandler.js';
 import { 
   SUPPORTED_AUDIO_MIMETYPES, SUPPORTED_EXTENSIONS, EXTENSION_TO_MIMETYPE, 
   SUPPORTED_VIDEO_MIMETYPES, SUPPORTED_VIDEO_EXTENSIONS, VIDEO_EXTENSION_TO_MIMETYPE,
@@ -656,7 +657,7 @@ ${contentType === 'book' ? `✍️ *المؤلف:* ${item.author || 'غير مح
       const contentType = session?.data?.contentType || 'audio';
       const typeObj = CONTENT_TYPES[contentType] || CONTENT_TYPES.audio;
 
-      const buffer = await downloadMediaMessage(msg.raw, 'buffer', {}, { logger });
+      const buffer = await downloadMedia(msg.raw);
       if (!buffer) throw new Error('Download failed');
 
       const sizeMb = buffer.length / (1024 * 1024);
@@ -667,7 +668,9 @@ ${contentType === 'book' ? `✍️ *المؤلف:* ${item.author || 'غير مح
       }
 
       const tempId = uuidv4();
-      const ext = path.extname(msg.filename || '') || (contentType === 'book' ? '.pdf' : contentType === 'video' ? '.mp4' : '.mp3');
+      const mediaInfo = getMediaMessageInfo(msg.raw);
+      const originalFilename = mediaInfo?.message?.fileName || '';
+      const ext = path.extname(originalFilename) || (contentType === 'book' ? '.pdf' : contentType === 'video' ? '.mp4' : '.mp3');
       const tempPath = path.join(config.rootDir, 'uploads', `user_${tempId}${ext}`);
       fs.writeFileSync(tempPath, buffer);
 

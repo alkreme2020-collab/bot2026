@@ -11,7 +11,7 @@ import logger, { dbLog } from '../../utils/logger.js';
 import { formatBytes, userCommands } from '../userCommands/index.js';
 import { phoneToJid } from '../../utils/jidHelper.js';
 import { hfSessionSync } from '../../services/hfSessionSync.js';
-import { downloadMediaMessage } from '@whiskeysockets/baileys';
+import { downloadMedia } from '../../utils/mediaHandler.js';
 
 /**
  * Helper to compute SHA256 checksum of a file.
@@ -645,7 +645,15 @@ export const adminCommands = {
 
       const isImage = msg.raw.message?.imageMessage || msg.raw.message?.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage;
       if (isImage) {
-        const buffer = await downloadMediaMessage(msg.raw, 'buffer', {}, { logger });
+        // If it's a quoted message, we need to pass the quoted message part to downloadMedia
+        // But getMediaMessageInfo extracts from msg.message.
+        // It's safer to pass msg.raw if it's direct, or construct a fake rawMsg for quoted.
+        let mediaRawMsg = msg.raw;
+        if (msg.raw.message?.extendedTextMessage?.contextInfo?.quotedMessage) {
+           mediaRawMsg = { message: msg.raw.message.extendedTextMessage.contextInfo.quotedMessage };
+        }
+        
+        const buffer = await downloadMedia(mediaRawMsg).catch(() => null);
         if (buffer) {
           tempPath = path.join(config.rootDir, 'temp', `ad_${uuidv4()}.jpg`);
           fs.writeFileSync(tempPath, buffer);
