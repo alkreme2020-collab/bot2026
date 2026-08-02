@@ -1,5 +1,7 @@
 import express from 'express';
 import QRCode from 'qrcode';
+import fs from 'fs';
+import path from 'path';
 import { initDatabase, closeDatabase } from './database/connection.js';
 import { cacheService } from './services/cacheService.js';
 import { client, latestQr, latestPairingCode, isConnected } from './bot/client.js';
@@ -175,6 +177,16 @@ async function gracefulShutdown(signal) {
 async function startApp() {
   try {
     logger.info('Bootstrapping Arabic WhatsApp Audio Library (Version 2.0)...');
+
+    // 0. Ensure necessary directories exist
+    const dirsToCreate = ['temp', 'uploads'];
+    for (const dir of dirsToCreate) {
+      const dirPath = path.join(config.rootDir, dir);
+      if (!fs.existsSync(dirPath)) {
+        fs.mkdirSync(dirPath, { recursive: true });
+        logger.info(`Created missing directory: ${dirPath}`);
+      }
+    }
 
     // 1. Download persisted database from Hugging Face (if available)
     await hfSessionSync.downloadDatabase();
