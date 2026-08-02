@@ -726,15 +726,34 @@ ${contentType === 'book' ? `✍️ *المؤلف:* ${item.author || 'غير مح
     const session = sessionService.getSession(msg.from);
     const contentType = session?.data?.contentType || 'audio';
 
-    sessionService.setSession(msg.from, 'AWAITING_ADD_DESC', { category: categoryName });
-    await msg.reply('📝 أرسل *وصفاً مختصراً* (اختياري) أو أرسل كلمة *\'تخطي\'*:');
+    if (contentType === 'book') {
+      sessionService.setSession(msg.from, 'AWAITING_ADD_DESC', { category: categoryName });
+      await msg.reply('📝 أرسل *وصفاً مختصراً* للكاتب أو الكتاب (اختياري) أو اكتب "تخطي":');
+    } else {
+      sessionService.setSession(msg.from, 'AWAITING_ADD_LOCATION', { category: categoryName });
+      await msg.reply('📍 أرسل *مكان الإلقاء/التسجيل* (أو اكتب "تخطي"):');
+    }
+  },
+
+  async handleAddLocation(client, msg) {
+    const text = msg.body.trim();
+    const location = text.toLowerCase() === 'تخطي' ? '' : text;
+    sessionService.setSession(msg.from, 'AWAITING_ADD_DATE_HIJRI', { location });
+    await msg.reply('📅 أرسل *التاريخ الهجري* (أو اكتب "تخطي"):');
+  },
+
+  async handleAddDateHijri(client, msg) {
+    const text = msg.body.trim();
+    const date_hijri = text.toLowerCase() === 'تخطي' ? '' : text;
+    sessionService.setSession(msg.from, 'AWAITING_ADD_DESC', { date_hijri });
+    await msg.reply('📝 أرسل *وصفاً مختصراً* للمادة (اختياري) أو اكتب "تخطي":');
   },
 
   async handleAddDescription(client, msg) {
     const text = msg.body.trim();
     const desc = text.toLowerCase() === 'تخطي' ? '' : text;
     const session = sessionService.getSession(msg.from);
-    const { contentType, tempPath, fileSize, title, author, presenter, category } = (session.data || {});
+    const { contentType, tempPath, fileSize, title, author, presenter, category, location = '', date_hijri = '' } = (session.data || {});
     const typeObj = CONTENT_TYPES[contentType] || CONTENT_TYPES.audio;
 
     try {
@@ -748,7 +767,10 @@ ${contentType === 'book' ? `✍️ *المؤلف:* ${item.author || 'غير مح
         category: category || 'عام',
         description: desc,
         audio_temp: tempPath,
-        media_type: contentType
+        media_type: contentType,
+        location,
+        date_hijri,
+        book_pages: 0
       });
 
       sessionService.clearSession(msg.from);
@@ -783,5 +805,34 @@ ${contentType === 'book' ? `✍️ *المؤلف:* ${item.author || 'غير مح
       logger.error(`Error completing user add proposal: ${err.message}`);
       await msg.reply('❌ حدث خطأ أثناء تقديم الطلب.');
     }
+  },
+
+  async notifySubscribers(client, contentInfo) {
+    const { title, presenter, category, size, media_type } = contentInfo;
+    const subscribers = await dbService.getAllSubscribers();
+    if (!subscribers || subscribers.length === 0) return;
+
+    const typeLabel = media_type === 'book' ? 'كتاب' : media_type === 'video' ? 'فيديو' : 'صوتية';
+    const presenterLabel = media_type === 'book' ? '✍️ المؤلف' : '👤 المقدم';
+    
+    const messageText = `🔔 *إشعار بإضافة جديدة!* 🔔\n\nتمت إضافة ${typeLabel} جديدة للمكتبة:\n\n` +
+      `📌 *العنوان:* ${title}\n` +
+      `${presenterLabel}: ${presenter}\n` +
+      `📂 *التصنيف:* ${category}\n` +
+      `💾 *الحجم:* ${formatBytes(size)}\n\n` +
+      `للبحث عنها، أرسل كلمة "بحث".`;
+
+    let successCount = 0;
+    for (const sub of subscribers) {
+      if (sub.phone === config.adminNumber) continue;
+      try {
+        await client.sendMessage(phoneToJid(sub.phone), { text: messageText });
+        successCount++;
+        await new Promise(r => setTimeout(r, 2000)); // anti-spam delay
+      } catch (err) {
+        logger.warn(`Could not notify subscriber ${sub.phone}: ${err.message}`);
+      }
+    }
+    logger.info(`Notified ${successCount} subscribers about new ${media_type}.`);
   }
 };

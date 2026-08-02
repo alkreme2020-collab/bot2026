@@ -345,6 +345,12 @@ export async function handleMessage(sock, rawMsg) {
           return await userCommands.handleAddCategorySelect(sock, msg, catName);
         }
 
+        case 'AWAITING_ADD_LOCATION':
+          return await userCommands.handleAddLocation(sock, msg);
+
+        case 'AWAITING_ADD_DATE_HIJRI':
+          return await userCommands.handleAddDateHijri(sock, msg);
+
         case 'AWAITING_ADD_DESC':
           return await userCommands.handleAddDescription(sock, msg);
 
