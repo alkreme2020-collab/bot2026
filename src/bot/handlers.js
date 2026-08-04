@@ -11,8 +11,34 @@ import { adminCommands } from '../commands/adminCommands/index.js';
 import { searchService } from '../services/searchService.js';
 import logger, { dbLog } from '../utils/logger.js';
 import { msgStore } from './client.js';
+import { CONTENT_TYPES } from '../constants/audio.js';
 
 const lastWarningTimes = new Map();
+
+/**
+ * Returns true if the raw WhatsApp message carries a media attachment.
+ */
+function hasMedia(rawMsg) {
+  const m = rawMsg?.message;
+  if (!m) return false;
+  return !!(m.audioMessage || m.documentMessage || m.videoMessage || m.imageMessage || m.stickerMessage);
+}
+
+/**
+ * The wizard states that expect text input (not a file upload).
+ */
+const WIZARD_TEXT_STATES = new Set([
+  'AWAITING_ADD_TITLE', 'AWAITING_ADD_AUTHOR',
+  'AWAITING_ADD_LOCATION', 'AWAITING_ADD_DATE_HIJRI', 'AWAITING_ADD_DESC'
+]);
+
+/**
+ * All wizard states (used to give better رجوع hint).
+ */
+const WIZARD_STATES = new Set([
+  'AWAITING_UPLOAD_FILE', 'AWAITING_ADD_TITLE', 'AWAITING_ADD_AUTHOR',
+  'AWAITING_ADD_CATEGORY', 'AWAITING_ADD_LOCATION', 'AWAITING_ADD_DATE_HIJRI', 'AWAITING_ADD_DESC'
+]);
 
 /**
  * Convert Arabic/Indic numerals to Western Arabic numerals
@@ -198,7 +224,8 @@ export async function handleMessage(sock, rawMsg) {
     const lastWarn = lastWarningTimes.get(phone) || 0;
     if (now - lastWarn > 5000) {
       lastWarningTimes.set(phone, now);
-      await sock.sendMessage(remoteJid, { text: '⚠️ الرجاء إرسال الرسائل ببطء.' }, { quoted: rawMsg });
+      const waitSec = Math.ceil((config.rateLimitMs || 1000) / 1000);
+      await sock.sendMessage(remoteJid, { text: `⚠️ يرجى الانتظار *${waitSec} ثانية* بين كل رسالة.` }, { quoted: rawMsg });
     }
     return;
   }
@@ -206,7 +233,25 @@ export async function handleMessage(sock, rawMsg) {
   try {
     const name = rawMsg.pushName || 'مستخدم واتساب';
     const isAdmin = phone === config.adminNumber;
-    await dbService.upsertUser(phone, name, isAdmin ? 'admin' : 'user');
+    const { isNew } = await dbService.upsertUser(phone, name, isAdmin ? 'admin' : 'user');
+
+    // Notify user if their previous wizard session expired while away
+    if (sessionService.wasAndClearExpired(phone)) {
+      sessionService.clearSession(phone);
+      await sock.sendMessage(remoteJid, {
+        text: '⌛ انتهت جلستك السابقة تلقائياً بعد 30 دقيقة من عدم النشاط.\n\nإليك القائمة الرئيسية:'
+      });
+    }
+
+    // Welcome new users on their very first message
+    if (isNew) {
+      await sock.sendMessage(remoteJid, {
+        text: `👋 أهلاً وسهلاً *${name}*! 🌟\n\nمرحباً بك في *منصة إعلام شبوة السلفي* 🎙️\nمكتبة علمية شاملة للصوتيات والفيديوهات والكتب الإسلامية.\n\n📌 استخدم الأزرار أدناه للتنقل.\n💡 يمكنك دائماً كتابة *القائمة* للعودة للبداية، أو *إلغاء* للخروج من أي خطوة.`
+      });
+    }
+
+    // Refresh session activity timestamp
+    sessionService.updateActivity(phone);
 
     let body = extractMessageBody(rawMsg, sock.user || {}, phone);
     body = body.replace(/`/g, '').trim();
@@ -269,6 +314,14 @@ export async function handleMessage(sock, rawMsg) {
 
     // Smart Back Handler
     if (cleanBody === 'رجوع') {
+      // If user is inside the upload wizard, رجوع cannot go back a step — advise إلغاء instead
+      if (session && WIZARD_STATES.has(session.state)) {
+        await sock.sendMessage(remoteJid, {
+          text: '↩️ لا يمكن الرجوع خطوة للخلف داخل معالج الإضافة.\n\nاكتب *إلغاء* للخروج من عملية الإضافة بالكامل والعودة للقائمة الرئيسية.'
+        });
+        return;
+      }
+
       if (!session || !session.data?.backTo) {
         sessionService.clearSession(phone);
         return await userCommands.handleStart(sock, msg);
@@ -284,7 +337,7 @@ export async function handleMessage(sock, rawMsg) {
       if (backTo === 'AWAITING_SEARCH') {
         return await userCommands.promptSearchInput(sock, msg, session.data.contentType || 'audio', session.data.categoryName);
       }
-      
+
       sessionService.clearSession(phone);
       return await userCommands.handleStart(sock, msg);
     }
@@ -331,34 +384,92 @@ export async function handleMessage(sock, rawMsg) {
         case 'CONTENT_LIST':
           return await userCommands.handleContentListInput(sock, msg, body);
 
-        case 'AWAITING_UPLOAD_FILE':
+        case 'AWAITING_UPLOAD_FILE': {
+          // User typed text instead of sending a file
+          if (!hasMedia(rawMsg)) {
+            const ct = session.data?.contentType || 'audio';
+            const typeObj = CONTENT_TYPES[ct] || CONTENT_TYPES.audio;
+            const fileHint = ct === 'book' ? 'PDF أو EPUB' : ct === 'video' ? 'MP4 أو MKV' : 'MP3 أو M4A';
+            await sock.sendMessage(remoteJid, {
+              text: `📎 *يرجى إرسال ملف ${typeObj.label}، وليس نصاً!*\n\nالصيغ المدعومة: ${fileHint}\n\nاكتب *إلغاء* للخروج من عملية الإضافة.`
+            }, { quoted: rawMsg });
+            return;
+          }
           return await userCommands.handleFileUpload(sock, msg);
+        }
 
-        case 'AWAITING_ADD_TITLE':
+        case 'AWAITING_ADD_TITLE': {
+          if (hasMedia(rawMsg)) {
+            await sock.sendMessage(remoteJid, {
+              text: `✍️ يرجى كتابة *العنوان* كنص، لا ترسل ملفاً هنا.\n\nاكتب العنوان أو اكتب *إلغاء* للخروج.`
+            }, { quoted: rawMsg });
+            return;
+          }
           return await userCommands.handleAddTitle(sock, msg);
+        }
 
-        case 'AWAITING_ADD_AUTHOR':
+        case 'AWAITING_ADD_AUTHOR': {
+          if (hasMedia(rawMsg)) {
+            const ct = session.data?.contentType || 'audio';
+            const label = ct === 'book' ? 'اسم المؤلف' : 'اسم المقدم/الشيخ';
+            await sock.sendMessage(remoteJid, {
+              text: `👤 يرجى كتابة *${label}* كنص.\n\nاكتب الاسم، أو "تخطي" إذا كان غير معروف، أو *إلغاء* للخروج.`
+            }, { quoted: rawMsg });
+            return;
+          }
           return await userCommands.handleAddAuthor(sock, msg);
+        }
 
         case 'AWAITING_ADD_CATEGORY': {
           const catName = body.replace(/^📋\s*/, '').trim();
           return await userCommands.handleAddCategorySelect(sock, msg, catName);
         }
 
-        case 'AWAITING_ADD_LOCATION':
+        case 'AWAITING_ADD_LOCATION': {
+          if (hasMedia(rawMsg)) {
+            await sock.sendMessage(remoteJid, {
+              text: `📍 يرجى كتابة *مكان الإلقاء* كنص، أو اكتب "تخطي".\n\nاكتب *إلغاء* للخروج.`
+            }, { quoted: rawMsg });
+            return;
+          }
           return await userCommands.handleAddLocation(sock, msg);
+        }
 
-        case 'AWAITING_ADD_DATE_HIJRI':
+        case 'AWAITING_ADD_DATE_HIJRI': {
+          if (hasMedia(rawMsg)) {
+            await sock.sendMessage(remoteJid, {
+              text: `📅 يرجى كتابة *التاريخ الهجري* كنص، أو اكتب "تخطي".\n\nاكتب *إلغاء* للخروج.`
+            }, { quoted: rawMsg });
+            return;
+          }
           return await userCommands.handleAddDateHijri(sock, msg);
+        }
 
-        case 'AWAITING_ADD_DESC':
+        case 'AWAITING_ADD_DESC': {
+          if (hasMedia(rawMsg)) {
+            await sock.sendMessage(remoteJid, {
+              text: `📝 يرجى كتابة *الوصف* كنص، أو اكتب "تخطي".\n\nاكتب *إلغاء* للخروج.`
+            }, { quoted: rawMsg });
+            return;
+          }
           return await userCommands.handleAddDescription(sock, msg);
+        }
 
         case 'AWAITING_DELETE_CONFIRM': {
           if (body.startsWith('تأكيد حذف ')) {
             const uuid = body.substring(9).trim();
             sessionService.clearSession(phone);
             return await adminCommands.confirmDelete(sock, msg, uuid);
+          }
+          // User typed "تأكيد" alone without the UUID
+          if (body === 'تأكيد') {
+            const uuid = session.data?.deleteUuid;
+            if (uuid) {
+              await sock.sendMessage(remoteJid, {
+                text: `⚠️ للتأكيد أرسل بالضبط:\n\n*تأكيد حذف ${uuid}*\n\nأو أرسل *إلغاء* لإلغاء العملية.`
+              }, { quoted: rawMsg });
+            }
+            return;
           }
           break;
         }

@@ -15,7 +15,7 @@ export const dbService = {
   async upsertUser(phone, name, role = 'user') {
     const db = getDb();
     const existing = await db.get('SELECT phone FROM users WHERE phone = ?', [phone]);
-    
+
     if (existing) {
       if (name) {
         await db.run(
@@ -28,11 +28,13 @@ export const dbService = {
           [phone]
         );
       }
+      return { isNew: false };
     } else {
       await db.run(
         'INSERT INTO users (phone, name, role, joined_at, last_seen) VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
         [phone, name || 'مستخدم واتساب', role]
       );
+      return { isNew: true };
     }
   },
 

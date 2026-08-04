@@ -33,6 +33,16 @@ export function formatBytes(bytes) {
 }
 
 /**
+ * Returns a wizard step label like "(2/7)" for use in prompts.
+ * @param {number} step - Current step number
+ * @param {string} contentType - 'audio' | 'video' | 'book'
+ */
+function wizardStep(step, contentType) {
+  const total = contentType === 'book' ? 5 : 7;
+  return `(${step}/${total})`;
+}
+
+/**
  * Helper to build navigation poll options based on state
  */
 export function buildNavPoll(options = {}) {
@@ -134,9 +144,12 @@ export const userCommands = {
     });
 
     try {
+      const stepSuffix = context === 'add'
+        ? ` — الخطوة ${wizardStep(4, contentType)}`
+        : '';
       const sentMsg = await client.sendMessage(msg.remoteJid, {
         poll: {
-          name: `📂 تصنيفات ${typeObj.label} (${typeObj.emoji}):`,
+          name: `📂 تصنيفات ${typeObj.label} (${typeObj.emoji})${stepSuffix}:`,
           values,
           selectableCount: 1
         }
@@ -163,8 +176,8 @@ export const userCommands = {
     });
 
     const text = categoryName
-      ? `🔍 اكتب كلمة البحث في تصنيف *(${categoryName})*:\n\n💡 اكتب *إلغاء* للرجوع`
-      : `🔍 اكتب كلمة البحث في كل *${typeObj.label}*:\n\n💡 اكتب *إلغاء* للرجوع`;
+      ? `🔍 *البحث في تصنيف (${categoryName}):*\n\nاكتب كلمة البحث (حرفان على الأقل):\n\n💡 اكتب *إلغاء* للرجوع`
+      : `🔍 *البحث في ${typeObj.label}:*\n\nاكتب كلمة البحث (حرفان على الأقل):\n\n💡 اكتب *إلغاء* للرجوع`;
 
     await msg.reply(text);
   },
@@ -174,7 +187,13 @@ export const userCommands = {
    */
   async executeSearch(client, msg, query, contentType = 'audio', categoryName = null) {
     client.sendPresenceUpdate('composing', msg.remoteJid).catch(() => {});
-    
+
+    // Require at least 2 characters to avoid meaningless results
+    if (!query || query.trim().length < 2) {
+      await msg.reply(`🔍 كلمة البحث قصيرة جداً!\n\nيرجى كتابة *حرفين على الأقل* للبحث.\n\nأعد كتابة كلمة البحث أو اكتب *إلغاء* للخروج.`);
+      return;
+    }
+
     let results = searchService.search(query, contentType);
     if (categoryName) {
       results = results.filter(item => item.category === categoryName);
@@ -356,11 +375,25 @@ export const userCommands = {
     }
 
     if (cleanText === '📥 تحميل رقم آخر') {
-      await msg.reply('📥 أرسل رقم المحتوى المطلوب لتحميله.');
+      await msg.reply(`📥 أرسل رقم المحتوى المطلوب لتحميله (من 1 إلى ${lastItems?.length || '؟'}).`);
       return;
     }
 
-    await msg.reply('❌ إدخال غير صحيح. أرسل رقم المحتوى لتحميله أو اختر من الاستطلاع.');
+    // Unknown input — remind user what to do and re-show nav buttons
+    await msg.reply(`❓ لم أفهم!\n\nأرسل *رقم* المحتوى لتحميله (مثل: 1، 2، 3...)\nأو اختر من الأزرار أدناه:`);
+    try {
+      const navValues = buildNavPoll({
+        currentPage: (page || 0) + 1,
+        totalPages: totalPages || 1,
+        hasSearch: true,
+        hasBack: true
+      });
+      const sentMsg = await client.sendMessage(msg.remoteJid, {
+        poll: { name: '📌 اختر الإجراء:', values: navValues, selectableCount: 1 }
+      });
+      if (sentMsg?.key?.id && sentMsg.message) msgStore.set(sentMsg.key.id, sentMsg.message);
+      recentPollSent.record(msg.from, navValues);
+    } catch (e) {}
   },
 
   /**
@@ -632,17 +665,17 @@ ${contentType === 'book' ? `✍️ *المؤلف:* ${item.author || 'غير مح
     const text = (body || '').trim();
     if (text.includes('صوتية') || text.includes('صوتيات') || text.includes('🎧')) {
       sessionService.setSession(msg.from, 'AWAITING_UPLOAD_FILE', { contentType: 'audio' });
-      await msg.reply('📤 أرسل الملف الصوتي الآن (MP3, M4A, WAV, etc.):\n\n💡 اكتب *إلغاء* للرجوع.');
+      await msg.reply(`📤 *الخطوة 1/7 — إرسال الملف الصوتي*\n\nأرسل الملف الصوتي (MP3, M4A, WAV...):\n\n💡 اكتب *إلغاء* في أي خطوة للخروج.`);
       return;
     }
     if (text.includes('فيديو') || text.includes('🎬')) {
       sessionService.setSession(msg.from, 'AWAITING_UPLOAD_FILE', { contentType: 'video' });
-      await msg.reply('📤 أرسل ملف الفيديو الآن (MP4, MKV, WEBM, etc.):\n\n💡 اكتب *إلغاء* للرجوع.');
+      await msg.reply(`📤 *الخطوة 1/7 — إرسال ملف الفيديو*\n\nأرسل ملف الفيديو (MP4, MKV, WEBM...):\n\n💡 اكتب *إلغاء* في أي خطوة للخروج.`);
       return;
     }
     if (text.includes('كتب') || text.includes('📚')) {
       sessionService.setSession(msg.from, 'AWAITING_UPLOAD_FILE', { contentType: 'book' });
-      await msg.reply('📤 أرسل ملف الكتاب الآن (PDF, EPUB, MOBI):\n\n💡 اكتب *إلغاء* للرجوع.');
+      await msg.reply(`📤 *الخطوة 1/5 — إرسال ملف الكتاب*\n\nأرسل ملف الكتاب (PDF, EPUB, MOBI):\n\n💡 اكتب *إلغاء* في أي خطوة للخروج.`);
       return;
     }
     if (text.includes('إلغاء') || text === 'cancel') {
@@ -681,7 +714,9 @@ ${contentType === 'book' ? `✍️ *المؤلف:* ${item.author || 'غير مح
         ext
       });
 
-      await msg.reply(`📥 تم استلام ملف ${typeObj.label} بنجاح! (${sizeMb.toFixed(2)} MB)\n\n✍️ أرسل *العنوان* الآن:`);
+      const step2 = wizardStep(2, contentType);
+      const titleHint = contentType === 'book' ? 'الكتاب' : contentType === 'video' ? 'الفيديو' : 'الصوتية';
+      await msg.reply(`✅ تم استلام الملف بنجاح! (${sizeMb.toFixed(2)} MB)\n\n✍️ *الخطوة ${step2} — العنوان*\nأرسل عنوان ${titleHint}:\n\n💡 اكتب *إلغاء* للخروج.`);
     } catch (err) {
       logger.error(`Error during file upload: ${err.message}`);
       await msg.reply('❌ حدث خطأ أثناء استلام الملف. تأكد من إرسال مستند صالح.');
@@ -690,20 +725,23 @@ ${contentType === 'book' ? `✍️ *المؤلف:* ${item.author || 'غير مح
 
   async handleAddTitle(client, msg) {
     const title = msg.body.trim();
+    const session = sessionService.getSession(msg.from);
+    const contentType = session?.data?.contentType || 'audio';
+    const step2 = wizardStep(2, contentType);
+    const step3 = wizardStep(3, contentType);
+
     if (title.length < 2) {
-      await msg.reply('❌ العنوان قصير جداً. أعد المحاولة:');
+      const titleHint = contentType === 'book' ? 'الكتاب' : contentType === 'video' ? 'الفيديو' : 'الصوتية';
+      await msg.reply(`✍️ *الخطوة ${step2} — العنوان*\n\nالعنوان قصير جداً! اكتب العنوان الكامل لـ${titleHint}:\n\n💡 اكتب *إلغاء* للخروج.`);
       return;
     }
 
-    const session = sessionService.getSession(msg.from);
-    const contentType = session?.data?.contentType || 'audio';
+    sessionService.setSession(msg.from, 'AWAITING_ADD_AUTHOR', { title });
 
     if (contentType === 'book') {
-      sessionService.setSession(msg.from, 'AWAITING_ADD_AUTHOR', { title });
-      await msg.reply('✍️ أرسل *اسم المؤلف* (أو اكتب "تخطي"):');
+      await msg.reply(`✅ تم حفظ العنوان.\n\n✍️ *الخطوة ${step3} — اسم المؤلف*\nأرسل اسم المؤلف (أو اكتب "تخطي"):\n\n💡 اكتب *إلغاء* للخروج.`);
     } else {
-      sessionService.setSession(msg.from, 'AWAITING_ADD_AUTHOR', { title });
-      await msg.reply('👤 أرسل *اسم المقدم/الشيخ*:');
+      await msg.reply(`✅ تم حفظ العنوان.\n\n👤 *الخطوة ${step3} — اسم المقدم/الشيخ*\nأرسل اسم المقدم أو الشيخ:\n\n💡 اكتب *إلغاء* للخروج.`);
     }
   },
 
@@ -728,10 +766,10 @@ ${contentType === 'book' ? `✍️ *المؤلف:* ${item.author || 'غير مح
 
     if (contentType === 'book') {
       sessionService.setSession(msg.from, 'AWAITING_ADD_DESC', { category: categoryName });
-      await msg.reply('📝 أرسل *وصفاً مختصراً* للكاتب أو الكتاب (اختياري) أو اكتب "تخطي":');
+      await msg.reply(`✅ تم اختيار التصنيف: *${categoryName}*\n\n📝 *الخطوة 5/5 — الوصف*\nأرسل وصفاً مختصراً للكتاب/المؤلف (اختياري) أو اكتب "تخطي":\n\n💡 اكتب *إلغاء* للخروج.`);
     } else {
       sessionService.setSession(msg.from, 'AWAITING_ADD_LOCATION', { category: categoryName });
-      await msg.reply('📍 أرسل *مكان الإلقاء/التسجيل* (أو اكتب "تخطي"):');
+      await msg.reply(`✅ تم اختيار التصنيف: *${categoryName}*\n\n📍 *الخطوة 5/7 — مكان الإلقاء*\nأرسل مكان التسجيل/الإلقاء (أو اكتب "تخطي"):\n\n💡 اكتب *إلغاء* للخروج.`);
     }
   },
 
@@ -739,14 +777,14 @@ ${contentType === 'book' ? `✍️ *المؤلف:* ${item.author || 'غير مح
     const text = msg.body.trim();
     const location = text.toLowerCase() === 'تخطي' ? '' : text;
     sessionService.setSession(msg.from, 'AWAITING_ADD_DATE_HIJRI', { location });
-    await msg.reply('📅 أرسل *التاريخ الهجري* (أو اكتب "تخطي"):');
+    await msg.reply(`✅ تم حفظ المكان.\n\n📅 *الخطوة 6/7 — التاريخ الهجري*\nأرسل تاريخ التسجيل الهجري (أو اكتب "تخطي"):\n\n💡 اكتب *إلغاء* للخروج.`);
   },
 
   async handleAddDateHijri(client, msg) {
     const text = msg.body.trim();
     const date_hijri = text.toLowerCase() === 'تخطي' ? '' : text;
     sessionService.setSession(msg.from, 'AWAITING_ADD_DESC', { date_hijri });
-    await msg.reply('📝 أرسل *وصفاً مختصراً* للمادة (اختياري) أو اكتب "تخطي":');
+    await msg.reply(`✅ تم حفظ التاريخ.\n\n📝 *الخطوة 7/7 — الوصف (الأخيرة!)*\nأرسل وصفاً مختصراً للمادة (أو اكتب "تخطي"):\n\n💡 اكتب *إلغاء* للخروج.`);
   },
 
   async handleAddDescription(client, msg) {

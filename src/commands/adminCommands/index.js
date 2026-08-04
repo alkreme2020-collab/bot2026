@@ -379,10 +379,13 @@ export const adminCommands = {
       }
 
       await cacheService.refresh();
-      await hfSessionSync.forceUploadDatabase();
-
       await msg.reply(`✅ تم حذف *(${item.title})* نهائياً.`);
       await dbLog('CONTENT_DELETED', `Admin deleted ${uuid} (${item.title})`);
+
+      // Sync DB to HF in background — no need to block the admin
+      hfSessionSync.forceUploadDatabase().catch(err =>
+        logger.error(`Background DB sync error after delete: ${err.message}`)
+      );
     } catch (err) {
       logger.error(`Error confirming deletion: ${err.message}`);
       await msg.reply('❌ فشل الحذف.');
