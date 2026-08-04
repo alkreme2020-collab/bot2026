@@ -193,16 +193,6 @@ export const adminCommands = {
 
       await dbService.updateRequestStatus(requestId, 'APPROVED');
       await cacheService.refresh();
-      await hfSessionSync.forceUploadDatabase();
-
-      // Notify Subscribers
-      await userCommands.notifySubscribers(client, {
-        title: req.title,
-        presenter: req.presenter || req.book_author,
-        category: req.category,
-        size: fileSize,
-        media_type: mediaType
-      });
 
       if (fs.existsSync(req.audio_temp)) {
         fs.unlinkSync(req.audio_temp);
@@ -210,10 +200,23 @@ export const adminCommands = {
 
       await dbLog('CONTENT_APPROVED', `Admin approved request ${requestId}. ${typeLabel} uuid: ${contentUuid}`);
 
+      // رد فوري على الأدمن دون انتظار العمليات الثانوية
       await msg.reply(`✅ تم قبول ${typeLabel} بنجاح ورفعها للمنصة!\n\n🔗 الرابط: ${hfUrl}`);
-      
-      const userMsg = `🎉 بشرى سارة! تمت الموافقة على ${typeLabel}تك المقترحة *"${req.title}"* وتمت إضافتها للمنصة! شكرًا لك.`;
-      await client.sendMessage(phoneToJid(req.phone), { text: userMsg });
+
+      // العمليات الثانوية تعمل في الخلفية بدون تأخير الأدمن
+      Promise.allSettled([
+        hfSessionSync.forceUploadDatabase(),
+        client.sendMessage(phoneToJid(req.phone), {
+          text: `🎉 بشرى سارة! تمت الموافقة على ${typeLabel}تك المقترحة *"${req.title}"* وتمت إضافتها للمنصة! شكرًا لك.`
+        }),
+        userCommands.notifySubscribers(client, {
+          title: req.title,
+          presenter: req.presenter || req.book_author,
+          category: req.category,
+          size: fileSize,
+          media_type: mediaType
+        })
+      ]).catch(err => logger.error(`Background tasks error after approval: ${err.message}`));
 
     } catch (err) {
       logger.error(`Error approving request ${requestId}: ${err.message}`);
